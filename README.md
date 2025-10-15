@@ -1,4 +1,4 @@
-# RTX Neural Texture Compression (NTC) SDK v0.7.2 BETA
+# RTX Neural Texture Compression (NTC) SDK v0.8.0 BETA
 
 [Quick Start Guide](#quick-start-guide)
 
@@ -46,7 +46,7 @@ See the [Settings and Quality Guide](docs/SettingsAndQuality.md) to learn more a
 
 ### Cooperative Vector and Inference
 
-Decompressing texels with NTC requires reading the latent data corresponding to a given texture coordinate and then performing an *inference* operation by running it through a small Multi-Layer Perceptron (MLP) network whose weights are determined during compression and stored as part of the compressed bundle. While this operation is modest relative to the massive networks employed by many other deep learning applications it still carries a significant computational cost relative to the average pixel shader commonly seen in 3D rendering applications. Fortunately, NTC is able to benefit from new [Cooporative Vector](https://registry.khronos.org/vulkan/specs/latest/man/html/VK_NV_cooperative_vector.html) extensions for Vulkan and Direct3D 12 which allow pixel shaders to leverage the same hardware acceleration used in large network inference. On Ada- and Blackwell-class GPUs this provides a 2-4x improvement in inference throughput over competing optimal implementations that do not utilize these new extensions.
+Decompressing texels with NTC requires reading the latent data corresponding to a given texture coordinate and then performing an *inference* operation by running it through a small Multi-Layer Perceptron (MLP) network whose weights are determined during compression and stored as part of the compressed bundle. While this operation is modest relative to the massive networks employed by many other deep learning applications it still carries a significant computational cost relative to the average pixel shader commonly seen in 3D rendering applications. Fortunately, NTC is able to benefit from new [Cooperative Vector](https://registry.khronos.org/vulkan/specs/latest/man/html/VK_NV_cooperative_vector.html) extensions for Vulkan and Direct3D 12 which allow pixel shaders to leverage the same hardware acceleration used in large network inference. On Ada- and Blackwell-class GPUs this provides a 2-4x improvement in inference throughput over competing optimal implementations that do not utilize these new extensions.
 
 In order to provide robust backwards compatibility, fallback implementations of the inference code using the `DP4a` instructions or regular integer math have also been provided. This will allow for the decompression code to be executed reliably on any platform that supports at least Direct3D 12 Shader Model 6; however, there will be substantial performance improvements on newer GPUs. See [System Requirements](#system-requirements) for more details.
 
@@ -110,7 +110,7 @@ For Cooperative Vector support on NVIDIA GPUs, please use the NVIDIA Graphics Dr
 - GeForce GPUs: https://developer.nvidia.com/downloads/shadermodel6-9-preview-driver
 - Quadro GPUs: https://developer.nvidia.com/downloads/assets/secure/shadermodel6-9-preview-driver-quadro
 
-For a list of software components needed to build the SDK, please refer to the [Build Guide](##Building NTC SDK).
+For a list of software components needed to build the SDK, please refer to the [Build Guide](#build-guide).
 
 ## Known Issues
 
@@ -128,8 +128,9 @@ Building the NTC SDK on Windows requires the following components:
 
 - Visual Studio 2022 (at least the build tools)
 - [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk) (tested with 10.0.26100.0)
-- [CMake](https://cmake.org/download) (tested with v3.28 and v3.31)
-- [CUDA SDK](https://developer.nvidia.com/cuda-downloads) (tested with v12.8 and v12.9)
+- [CMake](https://cmake.org/download) (tested with v3.31)
+- [CUDA SDK](https://developer.nvidia.com/cuda-downloads) (tested with v12.9)
+  * NOTE: CUDA 13 is incompatible with the 590.26 developer preview driver that is necessary to use DirectX 12 Cooperative Vectors. While the NTC SDK can be built with CUDA 13, the resulting binaries will not work on the 590.26 driver. Please use CUDA 12.9 instead.
 
 Follow the usual way of building CMake projects on Windows:
 
@@ -159,7 +160,7 @@ Visual Studio Code with CMake Tools extension and Ninja build system works fine,
 Building the NTC SDK on Linux requires the following components:
 
 - C++ compiler (tested with GCC 12.2 and Clang 16.0)
-- [CMake](https://cmake.org/download) (tested with v3.25 and 3.31)
+- [CMake](https://cmake.org/download) (tested with v3.31)
 - [CUDA SDK](https://developer.nvidia.com/cuda-downloads) (tested with v12.4)
 - Some development packages, approximately:
   ```sh
@@ -202,7 +203,7 @@ Further details about specific usages of `LibNTC` can be found divided by topic 
         * [Decompressing texture sets with graphics APIs](docs/integration/InferenceOnLoad.md)
         * [Transcoding to BCn and image comparison](docs/integration/BlockCompression.md)
     * On Sample
-        * [Inference on Sample using Cooporative Vector](docs/integration/InferenceOnSample.md)
+        * [Inference on Sample using Cooperative Vector](docs/integration/InferenceOnSample.md)
     * On Feedback
         * See the [Inference on Feedback section](docs/Renderer.md#inference-on-feedback-mode) in the Renderer's Readme file.
 

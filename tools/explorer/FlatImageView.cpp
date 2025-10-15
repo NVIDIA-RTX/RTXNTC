@@ -44,7 +44,7 @@ FlatImageView::FlatImageView(
 {
 }
 
-bool FlatImageView::Init(nvrhi::IFramebuffer* framebuffer)
+bool FlatImageView::Init(nvrhi::FramebufferInfo const& framebufferInfo)
 {
     if (m_graphicsPipeline)
         return true;
@@ -81,7 +81,7 @@ bool FlatImageView::Init(nvrhi::IFramebuffer* framebuffer)
         .addBindingLayout(m_bindingLayout)
         .setRenderState(renderState);
 
-    m_graphicsPipeline = m_device->createGraphicsPipeline(graphicsPipelineDesc, framebuffer);
+    m_graphicsPipeline = m_device->createGraphicsPipeline(graphicsPipelineDesc, framebufferInfo);
 
     if (!m_graphicsPipeline)
         return false;

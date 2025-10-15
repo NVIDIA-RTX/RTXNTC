@@ -44,7 +44,6 @@ The JSON descriptor will refer to portions of the data chunk using offsets insid
 - `numColorMips`: int, optional(1), number of mip levels in the decompressed, color version of the texture set, `1..log2(max(width, height))+1`.
 - `numChannels`: int, required, number of color channels in the texture set, `1..16`.
 - `latentShape`: object `LatentShape`, optional.
-- `mlp`: object `MLP`, optional. This is a legacy field that should be concatenated with `mlpVersions` when reading for backward compatibility.
 - `mlpVersions`: unordered array of object `MLP`, optional.
 - `textures`: unordered array of object `Texture`, optional.
 - `channels`: ordered array of object `Channel`, optional, if present then count must match `numChannels`.
@@ -54,10 +53,7 @@ The JSON descriptor will refer to portions of the data chunk using offsets insid
 
 ### `LatentShape` object
 
-- `highResQuantBits`: int, required, number of quantization bits for the high-res grid, `1, 2, 4, 8`
-- `lowResQuantBits`: int, required, number of quantization bits for the low-res grid, `1, 2, 4, 8`
-- `highResFeatures`: int, required, number of features in the high-res grid, `4, 8, 12, 16`
-- `lowResFeatures`: int, required, number of features in the low-res grid, `4, 8, 12, 16`
+- `numFeatures`: int, required, number of features, `4, 8, 12, 16`
 
 Note that `LatentShape` doesn't specify the `gridSizeScale` parameter, as it is redundant (can be derived from the color and latent image sizes) and not really necessary for decompression.
 
@@ -99,14 +95,10 @@ Note that `LatentShape` doesn't specify the `gridSizeScale` parameter, as it is 
 
 ### `LatentImage` object
 
-- `highResWidth`: int, required
-- `highResHeight`: int, required
-- `lowResWidth`: int, required
-- `lowResHeight`: int, required
-- `highResBitsPerPixel`: int, required, packing stride of high-res latents
-- `lowResBitsPerPixel`: int, required, packing stride of low-res latents
-- `lowResView`: int, required, index of the `BufferView` object with the high-res latent data
-- `highResView`: int, required, index of the `BufferView` object with the low-res latent data
+- `width`: int, required
+- `height`: int, required
+- `arraySize`: int, required, number of array layers in the image
+- `view`: int, required, index of the `BufferView` object with the image data
 
 ### `ColorMip` object
 

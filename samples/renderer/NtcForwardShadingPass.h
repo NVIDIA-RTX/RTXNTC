@@ -26,7 +26,6 @@ class NtcForwardShadingPass : public donut::render::IGeometryPass
 protected:
     struct PipelineKey
     {
-        int networkVersion = 0;
         int weightType = 0;
         donut::engine::MaterialDomain domain = donut::engine::MaterialDomain::Opaque;
         nvrhi::RasterCullMode cullMode = nvrhi::RasterCullMode::Back;
@@ -35,18 +34,19 @@ protected:
         bool hasDepthPrepass = false;
         NtcMode ntcMode = NtcMode::InferenceOnSample;
         bool useSTF = false;
+        bool useNtcMaterial = false;
 
         bool operator==(PipelineKey const& other) const
         {
-            return networkVersion == other.networkVersion &&
-                   weightType == other.weightType &&
+            return weightType == other.weightType &&
                    domain == other.domain &&
                    cullMode == other.cullMode &&
                    frontCounterClockwise == other.frontCounterClockwise &&
                    reverseDepth == other.reverseDepth &&
                    hasDepthPrepass == other.hasDepthPrepass &&
                    ntcMode == other.ntcMode &&
-                   useSTF == other.useSTF;
+                   useSTF == other.useSTF &&
+                   useNtcMaterial == other.useNtcMaterial;
         }
 
         bool operator!=(PipelineKey const& other) const
@@ -60,7 +60,6 @@ protected:
         std::size_t operator()(PipelineKey const& s) const noexcept
         {
             size_t hash = 0;
-            nvrhi::hash_combine(hash, s.networkVersion);
             nvrhi::hash_combine(hash, s.weightType);
             nvrhi::hash_combine(hash, s.domain);
             nvrhi::hash_combine(hash, s.cullMode);
@@ -86,6 +85,7 @@ protected:
     nvrhi::BufferHandle m_lightConstants;
     nvrhi::BufferHandle m_passConstants;
     nvrhi::SamplerHandle m_stfSampler;
+    nvrhi::SamplerHandle m_latentSampler;
     
     nvrhi::BindingLayoutHandle m_materialBindingLayout;
     nvrhi::BindingLayoutHandle m_emptyMaterialBindingLayout;

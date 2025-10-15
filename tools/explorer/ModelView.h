@@ -47,7 +47,7 @@ public:
         std::shared_ptr<donut::engine::ShaderFactory> shaderFactory,
         nvrhi::IDevice* device);
 
-    bool Init(nvrhi::IFramebuffer* framebuffer);
+    bool Init(nvrhi::FramebufferInfoEx const& framebufferInfo);
     void Render(nvrhi::ICommandList* commandList, nvrhi::IFramebuffer* framebuffer);
 
     bool MousePosUpdate(double xpos, double ypos);

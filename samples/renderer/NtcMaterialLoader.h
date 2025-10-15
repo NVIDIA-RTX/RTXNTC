@@ -59,11 +59,9 @@ public:
         : m_device(device)
     { }
     
-    bool Init(bool enableCoopVecInt8, bool enableCoopVecFP8, nvrhi::ITexture* dummyTexture);
+    bool Init(bool enableCoopVec, nvrhi::ITexture* dummyTexture);
 
-    bool IsCooperativeVectorInt8Supported() const { return m_coopVecInt8; }
-    
-    bool IsCooperativeVectorFP8Supported() const { return m_coopVecFP8; }
+    bool IsCooperativeVectorSupported() const { return m_coopVec; }
 
     bool LoadMaterialsForScene(donut::engine::Scene& scene, std::filesystem::path const& materialDir, 
         bool enableInferenceOnLoad, bool enableBlockCompression, bool enableInferenceOnSample,
@@ -80,8 +78,7 @@ private:
 
     ntc::ContextWrapper m_ntcContext;
 
-    bool m_coopVecInt8 = false;
-    bool m_coopVecFP8 = false;
+    bool m_coopVec = false;
     WeightTypeHistogram m_weightTypeHistogram;
 
     std::shared_ptr<donut::engine::LoadedTexture> m_dummyTexture;

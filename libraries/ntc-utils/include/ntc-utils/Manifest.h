@@ -55,6 +55,7 @@ struct ManifestEntry
     bool isSRGB = false;
     bool verticalFlip = false;
     ntc::BlockCompressedFormat bcFormat = ntc::BlockCompressedFormat::None;
+    std::vector<float> lossFunctionScales;
 };
 
 struct Manifest

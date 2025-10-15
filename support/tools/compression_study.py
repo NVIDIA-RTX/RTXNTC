@@ -14,6 +14,7 @@ import argparse
 import os
 import sys
 import time
+import csv
 
 # add ../../libraries to the path to import ntc
 sdkroot = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -24,17 +25,16 @@ import ntc
 # NOTE: Modify the `commonSettings` and `experiments` parameters here to suit your needs.
 
 def apply_common_settings(args: ntc.Arguments):
+    args.randomSeed = 1
     pass
 
-# Array of (name, { parameter -> value })
-experiments = [
-    ("0.5",   { "bitsPerPixel": 0.5 }),
-    ("1.0",   { "bitsPerPixel": 1.0 }),
-    ("2.0",   { "bitsPerPixel": 2.0 }),
-    ("4.0",   { "bitsPerPixel": 4.0 }),
-    ("8.0",   { "bitsPerPixel": 8.0 }),
-    ("16.0",  { "bitsPerPixel": 16 }),
-]
+# Array of ([ column_names... ], { parameter : value })
+
+experimentTitles = ['Scale', 'Features']
+experiments = []
+for scale in range(1, 7):
+    for features in range(4, 20, 4):
+        experiments.append(([scale, features], { "latentShape": ntc.LatentShape(gridSizeScale = scale, numFeatures = features) }))
 
 # END of user-modifiable section
 # =======================================================================================
@@ -57,6 +57,7 @@ parser.add_argument('--trainingSteps', type = int, default = 100000, help = 'Tot
 parser.add_argument('--stepsPerIteration', type = int, default = 1000, help = 'Number of training steps between each PSNR measurement.')
 parser.add_argument('--devices', nargs = '*', default = [0], type = int, help = 'List of CUDA devices to use')
 parser.add_argument('--output', help = 'Path to the output CSV file')
+parser.add_argument('--compressedDir', help = 'Path to the directory to put compressed textures into')
 args = parser.parse_args()
 
 if not os.path.isfile(args.tool):
@@ -78,24 +79,22 @@ if args.filter is not None:
 targetMipCount = 13
 
 if args.output is not None:
-    outputFile = open(args.output, 'w')
+    outputFile = open(args.output, 'w', newline='')
 else:
     outputFile = sys.stdout
 
-outputFile.write('Name,Experiment,')
+writer = csv.writer(outputFile)
+headers = ['Name'] + experimentTitles
 if args.mips:
     for mip in range(targetMipCount):
-        outputFile.write(f'MIP {mip},')
+        headers.append(f'MIP {mip}')
 elif args.curve:
     for step in range(args.stepsPerIteration, args.trainingSteps + 1, args.stepsPerIteration):
-        outputFile.write(f'{step},')
-    outputFile.write('Final')
-else:
-    outputFile.write('PSNR')
-outputFile.write(',BPP')
-outputFile.write(',Time(s)')
-outputFile.write('\n')
-
+        headers.append(f'{step}')
+headers.append('PSNR')
+headers.append('BPP')
+headers.append('Time(s)')
+writer.writerow(headers)
 
 ordinal = 0
 count = 0
@@ -111,11 +110,15 @@ for (dirname, subdirs, files) in os.walk(args.dataset):
     if args.skip and (ordinal < args.skip):
         continue
 
-    shortDirname = dirname[len(args.dataset)+1:] if dirname.startswith(args.dataset) else dirname
+    shortDirname = os.path.relpath(dirname, args.dataset)
     if args.filter is not None and shortDirname not in materialFilter:
         continue
 
-    for (experimentName, parameters) in experiments:
+    for (experimentDescriptions, parameters) in experiments:
+        # If there is just one experiment description or name, make it a list
+        if not isinstance(experimentDescriptions, list):
+            experimentDescriptions = [experimentDescriptions]
+
         task = ntc.Arguments(tool=args.tool)
         task.__dict__.update(parameters)
         task.loadImages = dirname
@@ -124,8 +127,14 @@ for (dirname, subdirs, files) in os.walk(args.dataset):
         task.decompress = True
         task.trainingSteps = args.trainingSteps
         task.stepsPerIteration = args.stepsPerIteration
+
+        # Create the output file name if compressed output directory is specified
+        if args.compressedDir is not None:
+            experimentsShort = '_'.join([str(x) for x in experimentDescriptions])
+            task.saveCompressed = os.path.join(args.compressedDir, f'{shortDirname}_{experimentsShort}.ntc')
+
         apply_common_settings(task)
-        tasks.append((task, shortDirname, experimentName))
+        tasks.append((task, shortDirname, experimentDescriptions))
 
     count += 1
     if args.limit and count >= args.limit:
@@ -141,9 +150,9 @@ def FormatDuration(seconds):
 
 
 def task_ready(task, result: ntc.Result, originalTaskCount: int, completedTaskCount: int):
-    ntcArgs, shortDirname, experimentName = task
+    ntcArgs, shortDirname, experimentDescriptions = task
 
-    outputFile.write(f'{shortDirname},{experimentName},')
+    row = [shortDirname] + experimentDescriptions
 
     if args.mips:
         for mip in range(targetMipCount):
@@ -151,18 +160,16 @@ def task_ready(task, result: ntc.Result, originalTaskCount: int, completedTaskCo
                 psnr = result.perMipPsnr[mip]
             else:
                 psnr = ''
-            outputFile.write(f'{psnr},')
+            row.append(psnr)
     elif args.curve:
         run = result.compressionRuns[0]
         for psnr in result.compressionRuns:
-            outputFile.write(f'{psnr},')
-        outputFile.write(f'{result.overallPsnr}')
-    else:
-        outputFile.write(f'{result.overallPsnr}')
+            row.append(psnr)
 
-    outputFile.write(f',{result.bitsPerPixel or ""}')
-    outputFile.write(f',{result.elapsedTime:.2f}')
-    outputFile.write('\n')
+    row.append(result.overallPsnr)
+    row.append(result.savedFileBpp or '')
+    row.append(f'{result.elapsedTime:.2f}')
+    writer.writerow(row)
 
     if args.output is not None:
         elapsedTime = time.time() - startTime

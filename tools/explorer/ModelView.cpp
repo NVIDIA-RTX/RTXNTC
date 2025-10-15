@@ -67,7 +67,7 @@ ModelView::ModelView(
     m_descriptors.fill(nvrhi::BindingSetItem::None());
 }
 
-bool ModelView::Init(nvrhi::IFramebuffer* framebuffer)
+bool ModelView::Init(nvrhi::FramebufferInfoEx const& framebufferInfo)
 {
     if (!m_vertexShader)
     {        
@@ -96,12 +96,10 @@ bool ModelView::Init(nvrhi::IFramebuffer* framebuffer)
     if (!m_vertexShader || !m_pixelShader || !m_overlayPixelShader)
         return false;
 
-    const auto& renderTargetDesc = framebuffer->getDesc().colorAttachments[0].texture->getDesc();
-    
     if (m_depthBuffer)
     {
         const auto depthBufferDesc = m_depthBuffer->getDesc();
-        if (depthBufferDesc.width != renderTargetDesc.width || depthBufferDesc.height != renderTargetDesc.height)
+        if (depthBufferDesc.width != framebufferInfo.width || depthBufferDesc.height != framebufferInfo.height)
         {
             m_depthBuffer = nullptr;
             m_colorBuffer = nullptr;
@@ -112,8 +110,8 @@ bool ModelView::Init(nvrhi::IFramebuffer* framebuffer)
     {
         auto textureDesc = nvrhi::TextureDesc()
             .setDimension(nvrhi::TextureDimension::Texture2D)
-            .setWidth(renderTargetDesc.width)
-            .setHeight(renderTargetDesc.height)
+            .setWidth(framebufferInfo.width)
+            .setHeight(framebufferInfo.height)
             .setFormat(nvrhi::Format::D24S8)
             .setIsRenderTarget(true)
             .setDebugName("DepthBuffer")
@@ -160,7 +158,7 @@ bool ModelView::Init(nvrhi::IFramebuffer* framebuffer)
                     .disableDepthTest()
                     .disableDepthWrite()));
 
-        m_overlayPipeline = m_device->createGraphicsPipeline(pipelineDesc, framebuffer);
+        m_overlayPipeline = m_device->createGraphicsPipeline(pipelineDesc, framebufferInfo);
     }
 
     if (!m_overlayPipeline)
@@ -222,7 +220,7 @@ bool ModelView::Init(nvrhi::IFramebuffer* framebuffer)
         .addBindingLayout(m_bindlessLayout)
         .setRenderState(renderState);
     
-    m_graphicsPipeline = m_device->createGraphicsPipeline(graphicsPipelineDesc, framebuffer);
+    m_graphicsPipeline = m_device->createGraphicsPipeline(graphicsPipelineDesc, framebufferInfo);
 
     return true;
 }

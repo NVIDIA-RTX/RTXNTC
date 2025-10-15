@@ -235,25 +235,3 @@ bool SaveImageToContainer(ImageContainer container, void const* data, int width,
             fileName, /* err = */ nullptr) == TINYEXR_SUCCESS;
     }
 }
-
-std::optional<int> ParseNetworkVersion(char const* version)
-{
-    if (!version || !version[0])
-        return NTC_NETWORK_UNKNOWN;
-
-    std::string uppercaseVersion = version;
-    UppercaseString(uppercaseVersion);
-    
-    if (uppercaseVersion == "AUTO")
-        return NTC_NETWORK_UNKNOWN;
-    if (uppercaseVersion == "SMALL")
-        return NTC_NETWORK_SMALL;
-    if (uppercaseVersion == "MEDIUM")
-        return NTC_NETWORK_MEDIUM;
-    if (uppercaseVersion == "LARGE")
-        return NTC_NETWORK_LARGE;
-    if (uppercaseVersion == "XLARGE")
-        return NTC_NETWORK_XLARGE;
-    
-    return std::optional<int>();
-}

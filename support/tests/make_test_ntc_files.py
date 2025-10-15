@@ -28,19 +28,17 @@ destDir = os.path.join(sdkroot, 'assets/testfiles')
 
 tasks = []
 
-for networkVersion in ('small', 'medium', 'large', 'xlarge'):
-    ntcFileName = os.path.join(destDir, f'PavingStones070_4bpp_{networkVersion}.ntc')
+ntcFileName = os.path.join(destDir, f'PavingStones070_5bpp.ntc')
 
-    task = ntc.Arguments(
-        tool=ntc.get_default_tool_path(),
-        loadImages=sourceDir,
-        compress=True,
-        bitsPerPixel=4.0,
-        networkVersion=networkVersion,
-        saveCompressed=ntcFileName
-    )
+task = ntc.Arguments(
+    tool=ntc.get_default_tool_path(),
+    loadImages=sourceDir,
+    compress=True,
+    bitsPerPixel=5.0,
+    saveCompressed=ntcFileName
+)
 
-    tasks.append(task)
+tasks.append(task)
 
 def ready(task: ntc.Arguments, result: ntc.Result, originalTaskCount: int, tasksCompleted: int):
     print(f'{task.saveCompressed}: OK')

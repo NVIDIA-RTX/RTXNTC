@@ -15,8 +15,6 @@
 
 #define USE_COOPVEC
 
-#if NETWORK_VERSION != NTC_NETWORK_UNKNOWN
 #include "libntc/shaders/InferenceCoopVec.hlsli"
-#endif
 
 #include "NtcForwardShadingPass.hlsl"

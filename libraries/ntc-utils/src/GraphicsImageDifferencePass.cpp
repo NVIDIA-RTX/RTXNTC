@@ -11,6 +11,7 @@
  */
 
 #include <ntc-utils/GraphicsImageDifferencePass.h>
+#include <libntc/shaders/Bindings.h>
 
 bool GraphicsImageDifferencePass::Init()
 {
@@ -25,10 +26,10 @@ bool GraphicsImageDifferencePass::Init()
     auto bindingLayoutDesc = nvrhi::BindingLayoutDesc()
         .setVisibility(nvrhi::ShaderType::Compute)
         .setBindingOffsets(vulkanBindingOffsets)
-        .addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0))
-        .addItem(nvrhi::BindingLayoutItem::Texture_SRV(1))
-        .addItem(nvrhi::BindingLayoutItem::Texture_SRV(2))
-        .addItem(nvrhi::BindingLayoutItem::RawBuffer_UAV(3));
+        .addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(NTC_BINDING_IMAGE_DIFF_CONSTANT_BUFFER))
+        .addItem(nvrhi::BindingLayoutItem::Texture_SRV(NTC_BINDING_IMAGE_DIFF_INPUT_TEXTURE_A))
+        .addItem(nvrhi::BindingLayoutItem::Texture_SRV(NTC_BINDING_IMAGE_DIFF_INPUT_TEXTURE_B))
+        .addItem(nvrhi::BindingLayoutItem::RawBuffer_UAV(NTC_BINDING_IMAGE_DIFF_OUTPUT_BUFFER));
 
     m_bindingLayout = m_device->createBindingLayout(bindingLayoutDesc);
     if (!m_bindingLayout)
@@ -108,12 +109,12 @@ bool GraphicsImageDifferencePass::ExecuteComputePass(nvrhi::ICommandList* comman
     // Create the binding set
     nvrhi::BindingSetDesc bindingSetDesc;
     bindingSetDesc
-        .addItem(nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer))
-        .addItem(nvrhi::BindingSetItem::Texture_SRV(1, texture1)
+        .addItem(nvrhi::BindingSetItem::ConstantBuffer(NTC_BINDING_IMAGE_DIFF_CONSTANT_BUFFER, m_constantBuffer))
+        .addItem(nvrhi::BindingSetItem::Texture_SRV(NTC_BINDING_IMAGE_DIFF_INPUT_TEXTURE_A, texture1)
             .setSubresources(nvrhi::TextureSubresourceSet().setBaseMipLevel(mipLevel1)))
-        .addItem(nvrhi::BindingSetItem::Texture_SRV(2, texture2)
+        .addItem(nvrhi::BindingSetItem::Texture_SRV(NTC_BINDING_IMAGE_DIFF_INPUT_TEXTURE_B, texture2)
             .setSubresources(nvrhi::TextureSubresourceSet().setBaseMipLevel(mipLevel2)))
-        .addItem(nvrhi::BindingSetItem::RawBuffer_UAV(3, m_outputBuffer));
+        .addItem(nvrhi::BindingSetItem::RawBuffer_UAV(NTC_BINDING_IMAGE_DIFF_OUTPUT_BUFFER, m_outputBuffer));
 
     auto bindingSet = m_device->createBindingSet(bindingSetDesc, m_bindingLayout);
 

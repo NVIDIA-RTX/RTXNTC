@@ -464,6 +464,29 @@ bool ReadManifestFromFile(const char* fileName, Manifest& outManifest, std::stri
             return false;
         }
 
+        Json::Value const& lossFunctionScaleNode = node["lossFunctionScale"];
+        if (lossFunctionScaleNode.isArray())
+        {
+            for (const auto& scaleNode : lossFunctionScaleNode)
+            {
+                if (!scaleNode.isNumeric())
+                {
+                    outError = "Malformed manifest: all entries in the 'lossFunctionScale' array must be numeric.";
+                    return false;
+                }
+                entry.lossFunctionScales.push_back(scaleNode.asFloat());
+            }
+        }
+        else if (lossFunctionScaleNode.isNumeric())
+        {
+            entry.lossFunctionScales.push_back(lossFunctionScaleNode.asFloat());
+        }
+        else if (!lossFunctionScaleNode.isNull())
+        {
+            outError = "Malformed manifest: 'lossFunctionScale' property must be a number or an array of numbers.";
+            return false;
+        }
+
         outManifest.textures.push_back(entry);
     }
 

@@ -86,8 +86,10 @@ set(shader_outputs
     LegacyForwardShadingPass
     ForwardShadingPassFeedback)
 
-set(shader_outputs_slang
-    NtcForwardShadingPass_CoopVec)
+set(shader_outputs_coopvec_dxil
+    NtcForwardShadingPass_CoopVec.dxil.h)
+set(shader_outputs_coopvec_spirv
+    NtcForwardShadingPass_CoopVec.spirv.h)
 
 set(libntc_include_directory "${CMAKE_SOURCE_DIR}/libraries/RTXNTC-Library/include")
 set(libstf_include_directory "${CMAKE_SOURCE_DIR}/libraries/RTXTF-Library")
@@ -118,20 +120,29 @@ donut_compile_shaders_all_platforms(
     SHADERMAKE_OPTIONS_SPIRV "--vulkanVersion 1.2"
 )
 
-donut_compile_shaders_all_platforms(
+donut_compile_shaders(
     TARGET ntc-renderer-shaders
     PROJECT_NAME "NTC Renderer"
-    CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/SlangShaders.cfg
-    SLANG
+    CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/CoopVecShaders.cfg
     SOURCES ${shader_sources}
-    BYPRODUCTS_NO_EXT ${shader_outputs_slang}
+    BYPRODUCTS ${shader_outputs_coopvec_dxil}
     OUTPUT_FORMAT HEADER
-    OUTPUT_BASE ${shader_output_dir}
+    DXIL ${shader_output_dir}
     INCLUDES ${libntc_include_directory} ${libstf_include_directory}
-    # Disable errorneous 'use of uninitialized variable' warnings
-    SHADERMAKE_OPTIONS_DXIL "--shaderModel 6_9 -X -Wno-41016 -X -Wno-41012 -X -Xdxc -X -Vd"
-    # Disable errorneous 'use of uninitialized global variable' warnings
-    SHADERMAKE_OPTIONS_SPIRV "-X \"-Wno-41017 -capability spvCooperativeVectorNV\""
+    SHADER_MODEL 6_9
+    SHADERMAKE_OPTIONS_DXIL "--embedPDB"
+)
+
+donut_compile_shaders(
+    TARGET ntc-renderer-shaders
+    PROJECT_NAME "NTC Renderer"
+    CONFIG ${CMAKE_CURRENT_SOURCE_DIR}/CoopVecShaders.cfg
+    SOURCES ${shader_sources}
+    BYPRODUCTS ${shader_outputs_coopvec_spirv}
+    OUTPUT_FORMAT HEADER
+    SPIRV_SLANG ${shader_output_dir}
+    INCLUDES ${libntc_include_directory} ${libstf_include_directory}
+    SHADERMAKE_OPTIONS_SPIRV "-X \"-capability spvCooperativeVectorNV\""
 )
 
 add_dependencies(ntc-renderer ntc-renderer-shaders)

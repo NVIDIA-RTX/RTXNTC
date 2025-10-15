@@ -11,6 +11,7 @@
  */
 
 #include <ntc-utils/GraphicsDecompressionPass.h>
+#include <libntc/shaders/Bindings.h>
 
 bool GraphicsDecompressionPass::Init()
 {
@@ -28,9 +29,11 @@ bool GraphicsDecompressionPass::Init()
         layoutDesc
             .setVisibility(nvrhi::ShaderType::Compute)
             .setBindingOffsets(vulkanBindingOffsets)
-            .addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0))
-            .addItem(nvrhi::BindingLayoutItem::RawBuffer_SRV(1))
-            .addItem(nvrhi::BindingLayoutItem::RawBuffer_SRV(2));
+            .setRegisterSpaceAndDescriptorSet(NTC_BINDING_DECOMPRESSION_INPUT_SPACE)
+            .addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(NTC_BINDING_DECOMPRESSION_CONSTANT_BUFFER))
+            .addItem(nvrhi::BindingLayoutItem::Texture_SRV(NTC_BINDING_DECOMPRESSION_LATENT_TEXTURE))
+            .addItem(nvrhi::BindingLayoutItem::RawBuffer_SRV(NTC_BINDING_DECOMPRESSION_WEIGHT_BUFFER))
+            .addItem(nvrhi::BindingLayoutItem::Sampler(NTC_BINDING_DECOMPRESSION_LATENT_SAMPLER));
 
         m_bindingLayout = m_device->createBindingLayout(layoutDesc);
 
@@ -45,7 +48,7 @@ bool GraphicsDecompressionPass::Init()
         bindlessLayoutDesc
             .setVisibility(nvrhi::ShaderType::Compute)
             .setMaxCapacity(m_descriptorTableSize)
-            .addRegisterSpace(nvrhi::BindingLayoutItem::Texture_UAV(0));
+            .addRegisterSpace(nvrhi::BindingLayoutItem::Texture_UAV(NTC_BINDING_DECOMPRESSION_OUTPUT_SPACE));
 
         m_bindlessLayout = m_device->createBindlessLayout(bindlessLayoutDesc);
 
@@ -63,6 +66,17 @@ bool GraphicsDecompressionPass::Init()
         m_device->resizeDescriptorTable(m_descriptorTable, m_descriptorTableSize, false);
     }
 
+    if (!m_latentSampler)
+    {
+        nvrhi::SamplerDesc samplerDesc = nvrhi::SamplerDesc()
+            .setAllAddressModes(nvrhi::SamplerAddressMode::Wrap)
+            .setMagFilter(true)
+            .setMinFilter(true)
+            .setMipFilter(false);
+
+        m_latentSampler = m_device->createSampler(samplerDesc);
+    }
+
     return true;
 }
 
@@ -71,53 +85,80 @@ void GraphicsDecompressionPass::WriteDescriptor(nvrhi::BindingSetItem item)
     m_device->writeDescriptorTable(m_descriptorTable, item);
 }
 
-bool GraphicsDecompressionPass::SetInputData(nvrhi::ICommandList* commandList, ntc::IStream* inputStream,
-    ntc::StreamRange range)
+static bool IsLatentTextureCompatible(nvrhi::TextureDesc const& a, nvrhi::TextureDesc const& b)
 {
-    if (range.size + 1 == 0)
+    return a.dimension == b.dimension
+        && a.format == b.format
+        && a.width == b.width
+        && a.height == b.height
+        && a.arraySize == b.arraySize
+        && a.mipLevels == b.mipLevels;
+}
+
+bool GraphicsDecompressionPass::SetLatentDataFromTextureSet(nvrhi::ICommandList* commandList, ntc::IStream* inputStream,
+    ntc::ITextureSetMetadata* textureSetMetadata)
+{
+    ntc::LatentTextureDesc const latentTextureDescSrc = textureSetMetadata->GetLatentTextureDesc();
+
+    nvrhi::TextureDesc latentTextureDesc = nvrhi::TextureDesc()
+        .setDebugName("Latent Texture")
+        .setDimension(nvrhi::TextureDimension::Texture2DArray)
+        .setFormat(nvrhi::Format::BGRA4_UNORM)
+        .setWidth(latentTextureDescSrc.width)
+        .setHeight(latentTextureDescSrc.height)
+        .setArraySize(latentTextureDescSrc.arraySize)
+        .setMipLevels(latentTextureDescSrc.mipLevels)
+        .setInitialState(nvrhi::ResourceStates::ShaderResource)
+        .setKeepInitialState(true);
+
+    if (!m_latentTexture || m_latentTextureIsExternal ||
+        !IsLatentTextureCompatible(m_latentTexture->getDesc(), latentTextureDesc))
     {
-        range.size = inputStream->Size();
-    }
+        m_latentTexture = m_device->createTexture(latentTextureDesc);
+        m_latentTextureIsExternal = false;
 
-    // Make sure that the decompression input and staging buffers exist and have sufficient size
-    if (!m_inputBuffer || m_inputBufferIsExternal || m_inputBuffer->getDesc().byteSize < range.size)
-    {
-        nvrhi::BufferDesc inputBufferDesc;
-        inputBufferDesc
-            .setByteSize(range.size)
-            .setDebugName("DecompressionInputData")
-            .setCanHaveRawViews(true)
-            .setInitialState(nvrhi::ResourceStates::ShaderResource)
-            .setKeepInitialState(true);
-
-        m_inputBuffer = m_device->createBuffer(inputBufferDesc);
-        m_inputBufferIsExternal = false;
-
-        if (!m_inputBuffer)
+        if (!m_latentTexture)
             return false;
     }
 
     std::vector<uint8_t> latentsBuffer;
-    latentsBuffer.resize(range.size);
+    for (int mipLevel = 0; mipLevel < latentTextureDescSrc.mipLevels; ++mipLevel)
+    {
+        ntc::LatentTextureFootprint footprint;
+        ntc::Status ntcStatus = textureSetMetadata->GetLatentTextureFootprint(mipLevel, footprint);
+        if (ntcStatus != ntc::Status::Ok)
+            return false;
 
-    if (!inputStream->Seek(range.offset))
-        return false;
-        
-    if (!inputStream->Read(latentsBuffer.data(), latentsBuffer.size()))
-        return false;
+        if (!inputStream->Seek(footprint.range.offset))
+            return false;
 
-    commandList->writeBuffer(m_inputBuffer, latentsBuffer.data(), latentsBuffer.size());
+        latentsBuffer.resize(footprint.range.size);
+            
+        if (!inputStream->Read(latentsBuffer.data(), latentsBuffer.size()))
+            return false;
+
+        uint8_t const* srcData = latentsBuffer.data();
+
+        for (int layerIndex = 0; layerIndex < latentTextureDescSrc.arraySize; ++layerIndex)
+        {
+            commandList->writeTexture(m_latentTexture, layerIndex, mipLevel,
+                srcData, footprint.rowPitch);
+
+            srcData += footprint.slicePitch;
+        }
+    }
+
 
     return true;
 }
 
-void GraphicsDecompressionPass::SetInputBuffer(nvrhi::IBuffer* buffer)
+void GraphicsDecompressionPass::SetLatentTexture(nvrhi::ITexture* texture)
 {
-    if (buffer == m_inputBuffer)
+    if (texture == m_latentTexture)
         return;
-    
-    m_inputBuffer = buffer;
-    m_inputBufferIsExternal = true; // Prevent the buffer from being overwritten by a subsequent call to SetInputData
+
+    m_latentTexture = texture;
+    m_latentTextureIsExternal = true; // Prevent the texture from being overwritten by a subsequent call to SetInputData
 }
 
 bool GraphicsDecompressionPass::SetWeightsFromTextureSet(nvrhi::ICommandList* commandList,
@@ -254,9 +295,10 @@ bool GraphicsDecompressionPass::ExecuteComputePass(nvrhi::ICommandList* commandL
 
     nvrhi::BindingSetDesc bindingSetDesc;
     bindingSetDesc
-        .addItem(nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer))
-        .addItem(nvrhi::BindingSetItem::RawBuffer_SRV(1, m_inputBuffer))
-        .addItem(nvrhi::BindingSetItem::RawBuffer_SRV(2, m_weightBuffer));
+        .addItem(nvrhi::BindingSetItem::ConstantBuffer(NTC_BINDING_DECOMPRESSION_CONSTANT_BUFFER, m_constantBuffer))
+        .addItem(nvrhi::BindingSetItem::Texture_SRV(NTC_BINDING_DECOMPRESSION_LATENT_TEXTURE, m_latentTexture))
+        .addItem(nvrhi::BindingSetItem::RawBuffer_SRV(NTC_BINDING_DECOMPRESSION_WEIGHT_BUFFER, m_weightBuffer))
+        .addItem(nvrhi::BindingSetItem::Sampler(NTC_BINDING_DECOMPRESSION_LATENT_SAMPLER, m_latentSampler));
     nvrhi::BindingSetHandle bindingSet = m_bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_bindingLayout);
     if (!bindingSet)
         return false;

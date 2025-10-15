@@ -15,7 +15,7 @@ Open a command line in the `assets/models/FlightHelmet` folder in the SDK and ru
 
 ```sh
 # For compression with a fixed BPP use:
-python $NTC_SDK_PATH/support/tools/convert_gltf_materials.py FlightHelmet.gltf --bitsPerPixel 4.0 --output .
+python $NTC_SDK_PATH/support/tools/convert_gltf_materials.py FlightHelmet.gltf --bitsPerPixel 5.0 --output .
 # Alternatively, for adaptive compression use:
 python $NTC_SDK_PATH/support/tools/convert_gltf_materials.py FlightHelmet.gltf --targetPsnr 35.0 --output .
 ```
@@ -56,9 +56,7 @@ By default, it should load the model with NTC materials and display it in the In
 --no-inferenceOnSample    # disables the Inference on Sample mode
 --no-inferenceOnFeedback  # disables the Inference on Feedback mode
 --no-blockCompression     # disables BCn encoding on load, decompressed textures will be kept uncompressed
---no-coopVec              # disables all CoopVec features
---no-coopVecInt8          # disables the Int8 CoopVec features
---no-coopVecFP8           # disables the FP8 CoopVec features
+--no-coopVec              # disables the CoopVec inference features
 --referenceMaterials      # disables NTC and loads the model with its original materials instead
 ```
 
@@ -98,4 +96,4 @@ In essence, Inference on Feedback implements a streaming virtual texturing syste
 
 4. The [FeedbackManager](../samples/renderer/feedbackmanager/src/FeedbackManager.cpp) component manages the tiled resources and processes the sampler feedback. It relies on the [RTXTS-TTM](https://github.com/NVIDIA-RTX/RTXTS-TTM) library - the Tiled Texture Manager from the [RTX Texture Streaming SDK](https://github.com/NVIDIA-RTX/RTXTS). RTXTS-TTM implements the logic that manages tile allocations and releases, and the `FeedbackManager` interfaces that library with DX12 through [NVRHI](https://github.com/NVIDIA-RTX/NVRHI).
 
-Depending on the scene, view and rendering algorithm, Inference on Feedback can achive significant memory savings compared to using fully mapped BCn textures, up to 6x in our testing - and that includes the compressed NTC textures being resident in video memory. There is some GPU and CPU overhead due to the sampler feedback being recorded during rendering and processed on the CPU on every frame; this overhead may be significant in the sample app that runs at several hundreds of frames per second, but less noticeable in games with more realistic performance. The implementation in the Renderer sample could also be optimized, for example by batching the transcoding of texture tiles, or by using a single sampler feedback resource for all textures in each material, or by streaming tiles of NTC latents on-demand.
+Depending on the scene, view and rendering algorithm, Inference on Feedback can achive significant memory savings compared to using fully mapped BCn textures, up to 6x in our testing - and that includes the compressed NTC textures being resident in video memory. There is some GPU and CPU overhead due to the sampler feedback being recorded during rendering and processed on the CPU on every frame; this overhead may be significant in the sample app that runs at several hundreds of frames per second, but less noticeable in games with more realistic performance.

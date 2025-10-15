@@ -59,7 +59,6 @@ nvrhi::ShaderHandle NtcForwardShadingPass::GetOrCreatePixelShader(PipelineKey ke
         return it->second;
 
     // Create a new shader
-    char const* networkVersion = ntc::NetworkVersionToString(key.networkVersion);
     bool const transmissiveMaterial = 
         key.domain == donut::engine::MaterialDomain::Transmissive ||
         key.domain == donut::engine::MaterialDomain::TransmissiveAlphaTested ||
@@ -69,8 +68,7 @@ nvrhi::ShaderHandle NtcForwardShadingPass::GetOrCreatePixelShader(PipelineKey ke
         key.domain == donut::engine::MaterialDomain::TransmissiveAlphaTested;
     
     ntc::InferenceWeightType weightType = ntc::InferenceWeightType(key.weightType);
-    bool const useCoopVec = weightType == ntc::InferenceWeightType::CoopVecInt8 ||
-                            weightType == ntc::InferenceWeightType::CoopVecFP8;
+    bool const useCoopVec = weightType == ntc::InferenceWeightType::CoopVecFP8;
 
 
     std::vector<donut::engine::ShaderMacro> defines;
@@ -81,9 +79,7 @@ nvrhi::ShaderHandle NtcForwardShadingPass::GetOrCreatePixelShader(PipelineKey ke
     switch (key.ntcMode)
     {
         case NtcMode::InferenceOnSample:
-            defines.push_back({ "NETWORK_VERSION", networkVersion });
-            if (useCoopVec)
-                defines.push_back({ "USE_FP8", weightType == ntc::InferenceWeightType::CoopVecFP8 ? "1" : "0"});
+            defines.push_back({ "USE_NTC_MATERIAL", key.useNtcMaterial ? "1" : "0" });
 
             if (useCoopVec)
             {
@@ -127,8 +123,8 @@ nvrhi::GraphicsPipelineHandle NtcForwardShadingPass::GetOrCreatePipeline(Pipelin
 {
     if (key.ntcMode != NtcMode::InferenceOnSample)
     {
-        key.networkVersion = 0;
         key.weightType = 0;
+        key.useNtcMaterial = false;
     }
     else
     {
@@ -150,9 +146,9 @@ nvrhi::GraphicsPipelineHandle NtcForwardShadingPass::GetOrCreatePipeline(Pipelin
     switch(key.ntcMode)
     {
         case NtcMode::InferenceOnSample:
-            materialBindingLayout = key.networkVersion == NTC_NETWORK_UNKNOWN 
-                ? (nvrhi::IBindingLayout*)m_emptyMaterialBindingLayout 
-                : (nvrhi::IBindingLayout*)m_materialBindingLayout;
+            materialBindingLayout = key.useNtcMaterial
+                ? (nvrhi::IBindingLayout*)m_materialBindingLayout
+                : (nvrhi::IBindingLayout*)m_emptyMaterialBindingLayout;
             break;
 
         case NtcMode::InferenceOnLoad:
@@ -221,7 +217,8 @@ nvrhi::GraphicsPipelineHandle NtcForwardShadingPass::GetOrCreatePipeline(Pipelin
         return nullptr;
     }
 
-    nvrhi::GraphicsPipelineHandle pipeline = m_device->createGraphicsPipeline(pipelineDesc, framebuffer);
+    nvrhi::GraphicsPipelineHandle pipeline = m_device->createGraphicsPipeline(pipelineDesc,
+        framebuffer->getFramebufferInfo());
     m_pipelines[key] = pipeline;
     return pipeline;
 }
@@ -238,7 +235,7 @@ nvrhi::BindingSetHandle NtcForwardShadingPass::GetOrCreateMaterialBindingSet(Ntc
     if (material->ntcConstantBuffer)
     {
         bindingSetDesc.addItem(nvrhi::BindingSetItem::ConstantBuffer(FORWARD_BINDING_NTC_MATERIAL_CONSTANTS, material->ntcConstantBuffer));
-        bindingSetDesc.addItem(nvrhi::BindingSetItem::RawBuffer_SRV(FORWARD_BINDING_NTC_LATENTS_BUFFER, material->ntcLatentsBuffer));
+        bindingSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(FORWARD_BINDING_NTC_LATENTS_TEXTURE, material->ntcLatentsTexture));
         bindingSetDesc.addItem(nvrhi::BindingSetItem::RawBuffer_SRV(FORWARD_BINDING_NTC_WEIGHTS_BUFFER, material->ntcWeightsBuffer));
         bindingSet = m_device->createBindingSet(bindingSetDesc, m_materialBindingLayout);
     }
@@ -351,7 +348,8 @@ bool NtcForwardShadingPass::Init()
         .addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(FORWARD_BINDING_LIGHT_CONSTANTS))
         .addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(FORWARD_BINDING_NTC_PASS_CONSTANTS))
         .addItem(nvrhi::BindingLayoutItem::Sampler(FORWARD_BINDING_MATERIAL_SAMPLER))
-        .addItem(nvrhi::BindingLayoutItem::Sampler(FORWARD_BINDING_STF_SAMPLER));
+        .addItem(nvrhi::BindingLayoutItem::Sampler(FORWARD_BINDING_STF_SAMPLER))
+        .addItem(nvrhi::BindingLayoutItem::Sampler(FORWARD_BINDING_LATENTS_SAMPLER));
 
     m_shadingBindingLayout = m_device->createBindingLayout(shadingLayoutDecs);
 
@@ -365,7 +363,7 @@ bool NtcForwardShadingPass::Init()
 
     materialLayoutDesc
         .addItem(nvrhi::BindingLayoutItem::ConstantBuffer(FORWARD_BINDING_NTC_MATERIAL_CONSTANTS))
-        .addItem(nvrhi::BindingLayoutItem::RawBuffer_SRV(FORWARD_BINDING_NTC_LATENTS_BUFFER))
+        .addItem(nvrhi::BindingLayoutItem::Texture_SRV(FORWARD_BINDING_NTC_LATENTS_TEXTURE))
         .addItem(nvrhi::BindingLayoutItem::RawBuffer_SRV(FORWARD_BINDING_NTC_WEIGHTS_BUFFER));
 
     m_materialBindingLayout = m_device->createBindingLayout(materialLayoutDesc);
@@ -423,11 +421,19 @@ bool NtcForwardShadingPass::Init()
         .setAllAddressModes(nvrhi::SamplerAddressMode::Wrap);
     m_stfSampler = m_device->createSampler(samplerDesc);
 
+    auto latentsSamplerDesc = nvrhi::SamplerDesc()
+        .setMinFilter(true)
+        .setMagFilter(true)
+        .setMipFilter(false)
+        .setAllAddressModes(nvrhi::SamplerAddressMode::Wrap);
+    m_latentSampler = m_device->createSampler(latentsSamplerDesc);
+
     auto shadingBindingSetDesc = nvrhi::BindingSetDesc()
         .addItem(nvrhi::BindingSetItem::ConstantBuffer(FORWARD_BINDING_LIGHT_CONSTANTS, m_lightConstants))
         .addItem(nvrhi::BindingSetItem::ConstantBuffer(FORWARD_BINDING_NTC_PASS_CONSTANTS, m_passConstants))
         .addItem(nvrhi::BindingSetItem::Sampler(FORWARD_BINDING_MATERIAL_SAMPLER, m_commonPasses->m_AnisotropicWrapSampler))
-        .addItem(nvrhi::BindingSetItem::Sampler(FORWARD_BINDING_STF_SAMPLER, m_stfSampler));
+        .addItem(nvrhi::BindingSetItem::Sampler(FORWARD_BINDING_STF_SAMPLER, m_stfSampler))
+        .addItem(nvrhi::BindingSetItem::Sampler(FORWARD_BINDING_LATENTS_SAMPLER, m_latentSampler));
 
     m_shadingBindingSet = m_device->createBindingSet(shadingBindingSetDesc, m_shadingBindingLayout);
 
@@ -515,8 +521,8 @@ bool NtcForwardShadingPass::SetupMaterial(
     PipelineKey key = context.keyTemplate;
     key.cullMode = cullMode;
     key.domain = material->domain;
-    key.networkVersion = ntcMaterial->networkVersion;
     key.weightType = ntcMaterial->weightType;
+    key.useNtcMaterial = key.ntcMode == NtcMode::InferenceOnSample && ntcMaterial->ntcConstantBuffer != nullptr;
 
     nvrhi::IBindingSet* materialBindingSet = nullptr;
     switch(key.ntcMode)

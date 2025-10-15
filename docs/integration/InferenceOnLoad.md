@@ -41,19 +41,49 @@ The `ComputePassDesc` returned by `MakeDecompressionComputePass` contains the fo
 
 It is the application's responsibility to create the compute pipeline, constant buffer, weight buffer (see below), and fill the buffers with the provided data. The application must also populate the descriptor table (DX12) or descriptor sets (Vk) to bind these resources to the right slots of the compute shader. The bindings are static and described in the comments to `IContext::MakeDecompressionComputePass` in [ntc.h](/libraries/RTXNTC-Library/include/libntc/ntc.h). The actual code needed to perform these operations depends on the graphics API and the abstraction layer (RHI) used by the application. The SDK apps are using [NVRHI](https://github.com/NVIDIAGameWorks/nvrhi), and the implementation of the decompression pass with NVRHI can be found in [GraphicsDecompressionPass.cpp](/libraries/ntc-utils/src/GraphicsDecompressionPass.cpp). 
 
-The most important resources for the decompression pass are provided implicitly: it's the latents buffer which contains most of the NTC texture set file, and the weight buffer that contains the inference weights. The latents data need to be uploaded into a GPU buffer and bound to the decompression pipeline as a `ByteAddressBuffer` (DX12) or `StorageBuffer` (Vk). The exact means of reading the file, uploading it to the GPU, and managing live files in GPU memory is left up to the application; notably, apps can use DirectStorage to load the data.
+The most important resources for the decompression pass are provided implicitly: it's the latents texture which contains most of the NTC texture set file, and the weight buffer that contains the inference weights. The latents data need to be uploaded into a GPU texture and bound to the decompression pipeline as a `Texture2DArray`. The exact means of reading the file, uploading it to the GPU, and managing live files in GPU memory are left up to the application.
 
-It's possible to load only a subset of the NTC texture set file for decompression if not all mip levels need to be decompressed. The example above uses the `ntc::EntireStream` constant to specify that the entire file is loaded; to use a subset of the file, first obtain the required stream range for the desired set of mip levels:
+To initialize the texture, first obtain the descriptor of the texture from `ITextureSetMetadata`, and then create the texture object:
 
 ```c++
-ntc::StreamRange streamRange;
-ntcStatus = metadata->GetStreamRangeForLatents(firstMip, numMips, streamRange);
+ntc::LatentTextureDesc const latentTextureDescSrc = textureSetMetadata->GetLatentTextureDesc();
 
-if (ntcStatus != ntc::Status::Ok)
-    // Handle the error.
+// Create the 2D texture array object using your engine's API, matching the fields provided by LatentTextureDesc:
+// - width and height in pixels
+// - array size
+// - mip level count
+// - format must be DXGI_FORMAT_B4G4R4A4_UNORM (DX12) or VK_FORMAT_A4R4G4B4_UNORM_PACK16 (Vulkan)
 ```
 
-Then use the `streamRange` fields `offset` and `size` to read that portion of the input file or stream into a buffer, and provide the range via `MakeDecompressionComputePassParameters::latentStreamRange` to make it provide correct data offsets to the decompression shader.
+After creating the texture, upload the latent data into it by reading the data from the NTC file using footprint information provided by `ITextureSetMetadata::GetLatentTextureFootprint(...)`:
+
+```c++
+std::vector<uint8_t> latentData;
+for (int mipLevel = 0; mipLevel < latentTextureDescSrc.mipLevels; ++mipLevel)
+{
+    ntc::LatentTextureFootprint footprint;
+    ntc::Status ntcStatus = textureSetMetadata->GetLatentTextureFootprint(mipLevel, footprint);
+    if (ntcStatus != ntc::Status::Ok)
+        // Handle the error.
+
+    latentData.resize(footprint.range.size);
+
+    ntcFile->Seek(footprint.range.offset);
+    if (!ntcFile->Read(latentData.data(), latentData.size()))
+        // Handle the error.
+    
+    uint8_t const* srcData = latentData.data();
+
+    for (int layerIndex = 0; layerIndex < latentTextureDescSrc.arraySize; ++layerIndex)
+    {
+        // ... Upload the data from 'latentData' into the texture at 'mipLevel' and 'layerIndex',
+        // with 'footprint.rowPitch' bytes in each row - API/engine dependent ...
+
+        // Move on to the next array layer
+        srcData += footprint.slicePitch;
+    }
+}
+```
 
 The data for the weight buffer should be queried from the texture set and depends on the inference math version being used. For automatic selection of the weight version, use the `ITextureSetMetadata::GetBestSupportedWeightType(...)` function as shown above. Note that it might return `Unknown` in a rare but possible case when the texture set does not provide any Int8 data but the GPU does not support CoopVec-FP8 inference.
 

@@ -41,7 +41,6 @@ struct
     std::vector<char const*> loadImagesList;
     std::optional<ntc::BlockCompressedFormat> bcFormat;
     ImageContainer imageFormat = ImageContainer::Auto;
-    int networkVersion = NTC_NETWORK_UNKNOWN;
     bool compress = false;
     bool decompress = false;
     bool loadMips = false;
@@ -56,16 +55,9 @@ struct
     bool describe = false;
     bool discardMaskedOutPixels = false;
     bool enableCoopVec = true;
-    bool enableCoopVecInt8 = true;
-    bool enableCoopVecFP8 = true;
-    bool enableDP4a = true;
-    bool enableFloat16 = true;
     bool printVersion = false;
-    int gridSizeScale = 4;
-    int highResFeatures = 8;
-    int lowResFeatures = 16;
-    int highResQuantBits = 2;
-    int lowResQuantBits = 4;
+    int gridSizeScale = 2;
+    int numFeatures = NTC_MLP_FEATURES;
     int adapterIndex = -1;
     int cudaDevice = 0;
     int benchmarkIterations = 1;
@@ -88,7 +80,6 @@ bool ProcessCommandLine(int argc, const char** argv)
 {
     const char* bcFormatString = nullptr;
     const char* imageFormatString = nullptr;
-    const char* networkVersionString = nullptr;
     const char* dimensionsString = nullptr;
 
     struct argparse_option options[] = {
@@ -115,10 +106,7 @@ bool ProcessCommandLine(int argc, const char** argv)
         
         OPT_GROUP("Custom latent shape selection:"),
         OPT_INTEGER(0, "gridSizeScale", &g_options.gridSizeScale, "Ratio of source image size to high-resolution feature grid size"),
-        OPT_INTEGER(0, "highResFeatures", &g_options.highResFeatures, "Number of features in the high-resolution grid"),
-        OPT_INTEGER(0, "highResQuantBits", &g_options.highResQuantBits, "Number of bits to use for encoding of high-resolution features"),
-        OPT_INTEGER(0, "lowResFeatures", &g_options.lowResFeatures, "Number of features in the low-resolution grid"),
-        OPT_INTEGER(0, "lowResQuantBits", &g_options.lowResQuantBits, "Number of bits to use for encoding of low-resolution features"),
+        OPT_INTEGER(0, "numFeatures", &g_options.numFeatures, "Number of features"),
         
         OPT_GROUP("Training process controls:"),
         OPT_FLOAT  (0,   "gridLearningRate", &g_options.compressionSettings.gridLearningRate, "Maximum learning rate for the feature grid"),
@@ -128,7 +116,6 @@ bool ProcessCommandLine(int argc, const char** argv)
         OPT_BOOLEAN(0,   "stableTraining", &g_options.compressionSettings.stableTraining, "Use a more expensive but more numerically stable training algorithm for reproducible results"),
         OPT_INTEGER(0,   "stepsPerIteration", &g_options.compressionSettings.stepsPerIteration, "Training steps between progress reports"),
         OPT_INTEGER('S', "trainingSteps", &g_options.compressionSettings.trainingSteps, "Total training step count"),
-        OPT_BOOLEAN(0,   "fp8weights", &g_options.compressionSettings.trainFP8Weights, "Train a separate set of weights for FP8 inference (default on, use --no-fp8weights)"),
         
         OPT_GROUP("Output settings:"),
         OPT_STRING ('B', "bcFormat", &bcFormatString, "Set or override the BCn encoding format, BC1-BC7"),
@@ -145,20 +132,15 @@ bool ProcessCommandLine(int argc, const char** argv)
         OPT_FLOAT  (0,   "minBcPsnr", &g_options.minBcPsnr, "When using --matchBcPsnr, minimum PSNR value to use for NTC compression"),
         OPT_FLOAT  (0,   "maxBcPsnr", &g_options.maxBcPsnr, "When using --matchBcPsnr, maximum PSNR value to use for NTC compression"),
         OPT_FLOAT  (0,   "bcPsnrOffset", &g_options.bcPsnrOffset, "When using --matchBcPsnr, offset to apply to BCn PSNR value before NTC compression"),
-        OPT_STRING ('V', "networkVersion", &networkVersionString, "Network version to use for compression: auto, small, medium, large, xlarge"),
         
         OPT_GROUP("GPU and Graphics API settings:"),
         OPT_INTEGER(0, "adapter", &g_options.adapterIndex, "Index of the graphics adapter to use"),
-        OPT_BOOLEAN(0, "coopVec", &g_options.enableCoopVec, "Enable all CoopVec extensions (default on, use --no-coopVec)"),
-        OPT_BOOLEAN(0, "coopVecFP8", &g_options.enableCoopVecFP8, "Enable CoopVec extensions for FP8 math (default on, use --no-coopVecFP8)"),
-        OPT_BOOLEAN(0, "coopVecInt8", &g_options.enableCoopVecInt8, "Enable CoopVec extensions for Int8 math (default on, use --no-coopVecInt8)"),
+        OPT_BOOLEAN(0, "coopVec", &g_options.enableCoopVec, "Enable CoopVec extensions (default on, use --no-coopVec)"),
         OPT_INTEGER(0, "cudaDevice", &g_options.cudaDevice, "Index of the CUDA device to use"),
         OPT_BOOLEAN(0, "debug", &g_options.debug, "Enable debug features such as Vulkan validation layer or D3D12 debug runtime"),
-        OPT_BOOLEAN(0, "dp4a", &g_options.enableDP4a, "Enable DP4a instructions (default on, use --no-dp4a)"),
 #if NTC_WITH_DX12
         OPT_BOOLEAN(0, "dx12", &g_options.useDX12, "Use D3D12 API for graphics operations"),
 #endif
-        OPT_BOOLEAN(0, "float16", &g_options.enableFloat16, "Enable Float16 instructions (default on, use --no-float16)"),
         OPT_BOOLEAN(0, "listAdapters", &g_options.listAdapters, "Enumerate the graphics adapters present in the system"),
         OPT_BOOLEAN(0, "listCudaDevices", &g_options.listCudaDevices, "Enumerate the CUDA devices present in the system"),
 #if NTC_WITH_VULKAN
@@ -206,13 +188,6 @@ bool ProcessCommandLine(int argc, const char** argv)
         fprintf(stderr, "Options --vk and --dx12 cannot be used at the same time.\n");
         return false;
     }
-
-    if (!g_options.enableCoopVec)
-    {
-        g_options.enableCoopVecInt8 = false;
-        g_options.enableCoopVecFP8 = false;
-    }
-
 
     // Process explicit inputs
     if (g_options.loadImagesPath)
@@ -402,26 +377,6 @@ bool ProcessCommandLine(int argc, const char** argv)
         else
         {
             fprintf(stderr, "Invalid --imageFormat value '%s'.\n", imageFormatString);
-            return false;
-        }
-    }
-
-    if (networkVersionString && !g_options.compress)
-    {
-        fprintf(stderr, "The --networkVersion option is only applicable when --compress is used.");
-        return false;
-    }
-
-    if (networkVersionString)
-    {
-        auto parsedVersion = ParseNetworkVersion(networkVersionString);
-        if (parsedVersion.has_value())
-        {
-            g_options.networkVersion = parsedVersion.value();
-        }
-        else
-        {
-            fprintf(stderr, "Invalid --networkVersion value '%s'.\n", networkVersionString);
             return false;
         }
     }
@@ -627,23 +582,19 @@ bool PickLatentShape(ntc::LatentShape& outShape)
     else if (!std::isnan(g_options.bitsPerPixel))
     {
         float selectedBpp = 0.f;
-        if (ntc::PickLatentShape(g_options.bitsPerPixel, g_options.networkVersion, selectedBpp, outShape) != ntc::Status::Ok)
+        if (ntc::PickLatentShape(g_options.bitsPerPixel, selectedBpp, outShape) != ntc::Status::Ok)
         {
             fprintf(stderr, "Cannot select a latent shape for %.3f bpp.\n", g_options.bitsPerPixel);
             return false;
         }
 
-        printf("Selected latent shape for %.3f bpp: --gridSizeScale %d --highResFeatures %d --lowResFeatures %d "
-            "--highResQuantBits %d --lowResQuantBits %d\n", selectedBpp, outShape.gridSizeScale, outShape.highResFeatures, outShape.lowResFeatures,
-            outShape.highResQuantBits, outShape.lowResQuantBits);
+        printf("Selected latent shape for %.3f bpp: --gridSizeScale %d --numFeatures %d\n",
+            selectedBpp, outShape.gridSizeScale, outShape.numFeatures);
     }
     else
     {
-        outShape.highResFeatures = g_options.highResFeatures;
-        outShape.lowResFeatures = g_options.lowResFeatures;
         outShape.gridSizeScale = g_options.gridSizeScale;
-        outShape.highResQuantBits = g_options.highResQuantBits;
-        outShape.lowResQuantBits = g_options.lowResQuantBits;
+        outShape.numFeatures = g_options.numFeatures;
     }
     return true;
 }
@@ -699,6 +650,7 @@ ntc::ITextureSet* LoadImages(ntc::IContext* context, Manifest const& manifest, b
         ntc::ChannelFormat channelFormat = ntc::ChannelFormat::UNORM8;
         ntc::BlockCompressedFormat bcFormat = ntc::BlockCompressedFormat::None;
         bool isSRGB = false;
+        std::vector<float> lossFunctionScales;
 
         SourceImageData()
         { }
@@ -784,6 +736,26 @@ ntc::ITextureSet* LoadImages(ntc::IContext* context, Manifest const& manifest, b
             image->firstChannel = entry.firstChannel;
             image->manifestIndex = entryIndex;
             image->verticalFlip = entry.verticalFlip;
+            image->lossFunctionScales = entry.lossFunctionScales;
+
+            int numLossScales = int(image->lossFunctionScales.size());
+            if (numLossScales == 0)
+            {
+                // Default to 1.0 for all channels
+                image->lossFunctionScales.resize(image->channels, 1.f);
+            }
+            else if (numLossScales == 1)
+            {
+                // Expand to all channels
+                image->lossFunctionScales.resize(image->channels, image->lossFunctionScales[0]);
+            }
+            else if (numLossScales != image->channels)
+            {
+                fprintf(stderr, "Number of loss function scales (%d) does not match the number of channels "
+                    "(%d) in image '%s'.\n", numLossScales, image->channels, entry.fileName.c_str());
+                anyErrors = true;
+                return;
+            }
             
             printf("Loaded image '%s': %dx%d pixels, %d channels.\n", fileName.filename().generic_string().c_str(),
                 image->width, image->height, image->channels);
@@ -1113,12 +1085,11 @@ ntc::ITextureSet* LoadImages(ntc::IContext* context, Manifest const& manifest, b
         return nullptr;
     }
 
-    ntcStatus = textureSet->SetLatentShape(latentShape, g_options.networkVersion);
+    ntcStatus = textureSet->SetLatentShape(latentShape);
     if (ntcStatus != ntc::Status::Ok)
     {
-        fprintf(stderr, "Failed to set the latent shape to %d/%d/%d/%d/%d, code = %s\n%s\n",
-            latentShape.gridSizeScale, latentShape.highResFeatures, latentShape.lowResFeatures,
-            latentShape.highResQuantBits, latentShape.lowResQuantBits,
+        fprintf(stderr, "Failed to set the latent shape to %d/%d, code = %s\n%s\n",
+            latentShape.gridSizeScale, latentShape.numFeatures,
             ntc::StatusToString(ntcStatus), ntc::GetLastErrorMessage());
         return nullptr;
     }
@@ -1233,6 +1204,14 @@ ntc::ITextureSet* LoadImages(ntc::IContext* context, Manifest const& manifest, b
         texture->SetBlockCompressedFormat(image->bcFormat);
         texture->SetRgbColorSpace(srcRgbColorSpace);
         texture->SetAlphaColorSpace(srcAlphaColorSpace);
+
+        // Copy the loss function scales for this image's channels into the global array
+        assert(image->channels == int(image->lossFunctionScales.size()));
+        for (int channel = 0; channel < image->channels; ++channel)
+        {
+            g_options.compressionSettings.lossFunctionScales[image->firstChannel + channel] =
+                image->lossFunctionScales[channel];
+        }
     }
 
     // Pass the alpha mask channel index to NTC
@@ -1309,7 +1288,7 @@ bool CompressTextureSetWithTargetPSNR(ntc::IContext* context, ntc::ITextureSet* 
 
     float const targetPsnr = g_options.targetPsnr;
     float const maxBitsPerPixel = std::isnan(g_options.maxBitsPerPixel) ? 0.f : g_options.maxBitsPerPixel;
-    ntcStatus = session->Reset(targetPsnr, maxBitsPerPixel, g_options.networkVersion);
+    ntcStatus = session->Reset(targetPsnr, maxBitsPerPixel);
     CHECK_NTC_RESULT("Reset")
     
     printf("Starting search for optimal BPP to achieve %.2f dB PSNR.\n", g_options.targetPsnr);
@@ -1325,7 +1304,7 @@ bool CompressTextureSetWithTargetPSNR(ntc::IContext* context, ntc::ITextureSet* 
 
         printf("Experiment %d: %.2f bpp...\n", experimentCount + 1, bitsPerPixel);
 
-        ntcStatus = textureSet->SetLatentShape(latentShape, g_options.networkVersion);
+        ntcStatus = textureSet->SetLatentShape(latentShape);
         CHECK_NTC_RESULT(SetLatentShape)
 
         float psnr = NAN;
@@ -1379,11 +1358,11 @@ bool CompressTextureSetWithTargetPSNR(ntc::IContext* context, ntc::ITextureSet* 
     return true;
 }
 
-bool DecompressTextureSet(ntc::IContext* context, ntc::ITextureSet* textureSet, bool useFP8Weights)
+bool DecompressTextureSet(ntc::IContext* context, ntc::ITextureSet* textureSet, bool useInt8Weights)
 {
     ntc::DecompressionStats stats;
-    ntc::Status ntcStatus = textureSet->Decompress(&stats, useFP8Weights);
-    CHECK_NTC_RESULT(NtcDecompress);
+    ntc::Status ntcStatus = textureSet->Decompress(&stats, useInt8Weights);
+    CHECK_NTC_RESULT(Decompress);
 
     printf("CUDA decompression time: %.3f ms\n", stats.gpuTimeMilliseconds);
 
@@ -1391,9 +1370,9 @@ bool DecompressTextureSet(ntc::IContext* context, ntc::ITextureSet* textureSet, 
         g_options.inputType == ToolInputType::Manifest ||
         g_options.inputType == ToolInputType::Images)
     {
-        printf("Overall PSNR (%s weights): %.2f dB\n", useFP8Weights ? "FP8" : "INT8", ntc::LossToPSNR(stats.overallLoss));
+        printf("Overall PSNR (%s weights): %.2f dB\n", useInt8Weights ? "INT8" : "FP8", ntc::LossToPSNR(stats.overallLoss));
         
-        if (!useFP8Weights)
+        if (!useInt8Weights)
         {
             size_t maxNameLength = 0;
             for (int i = 0; i < textureSet->GetTextureCount(); ++i)
@@ -1436,6 +1415,19 @@ bool DecompressTextureSet(ntc::IContext* context, ntc::ITextureSet* textureSet, 
     return true;
 }
 
+size_t GetTextureSetPixelCount(ntc::ITextureSet* textureSet)
+{
+    size_t texturePixels = 0;
+    ntc::TextureSetDesc const& desc = textureSet->GetDesc();
+    for (int mip = 0; mip < desc.mips; ++mip)
+    {
+        int mipWidth = std::max(1, desc.width >> mip);
+        int mipHeight = std::max(1, desc.height >> mip);
+        texturePixels += size_t(mipWidth) * size_t(mipHeight);
+    }
+    return texturePixels;
+}
+
 bool SaveCompressedTextureSet(ntc::IContext* context, ntc::ITextureSet* textureSet)
 {
     ntc::FileStreamWrapper outputStream(context);
@@ -1456,15 +1448,8 @@ bool SaveCompressedTextureSet(ntc::IContext* context, ntc::ITextureSet* textureS
         return false;
     }
 
-    size_t texturePixels = 0;
-    ntc::TextureSetDesc const& desc = textureSet->GetDesc();
-    for (int mip = 0; mip < desc.mips; ++mip)
-    {
-        int mipWidth = std::max(1, desc.width >> mip);
-        int mipHeight = std::max(1, desc.height >> mip);
-        texturePixels += size_t(mipWidth) * size_t(mipHeight);
-    }
     uint64_t const fileSize = outputStream->Tell();
+    size_t const texturePixels = GetTextureSetPixelCount(textureSet);
     float const bpp = 8.f * float(fileSize) / float(texturePixels);
 
     printf("Saved '%s'\n", g_options.saveCompressedFileName);
@@ -1513,10 +1498,8 @@ void DescribeTextureSet(ntc::ITextureSetMetadata* textureSet)
     
     ntc::LatentShape const& latentShape = textureSet->GetLatentShape();
     printf("Base compression rate: --bitsPerPixel %.3f\n", ntc::GetLatentShapeBitsPerPixel(latentShape));
-    printf("Latent shape: --gridSizeScale %d --highResFeatures %d --lowResFeatures %d --highResQuantBits %d --lowResQuantBits %d\n",
-        latentShape.gridSizeScale, latentShape.highResFeatures, latentShape.lowResFeatures,
-        latentShape.highResQuantBits, latentShape.lowResQuantBits);
-    printf("Network version: %s\n", ntc::NetworkVersionToString(textureSet->GetNetworkVersion()));
+    printf("Latent shape: --gridSizeScale %d --numFeatures %d\n",
+        latentShape.gridSizeScale, latentShape.numFeatures);
     printf("Inference weights: Int8 [%c], FP8 [%c]\n",
         textureSet->IsInferenceWeightTypeSupported(ntc::InferenceWeightType::GenericInt8) ? 'Y' : 'N',
         textureSet->IsInferenceWeightTypeSupported(ntc::InferenceWeightType::GenericFP8) ? 'Y' : 'N');
@@ -1846,10 +1829,7 @@ int main(int argc, const char** argv)
         contextParams.vkInstance = device->getNativeObject(nvrhi::ObjectTypes::VK_Instance);
         contextParams.vkPhysicalDevice = device->getNativeObject(nvrhi::ObjectTypes::VK_PhysicalDevice);
         contextParams.vkDevice = device->getNativeObject(nvrhi::ObjectTypes::VK_Device);
-        contextParams.graphicsDeviceSupportsDP4a = g_options.enableDP4a && IsDP4aSupported(device);
-        contextParams.graphicsDeviceSupportsFloat16 = g_options.enableFloat16 && IsFloat16Supported(device);
-        contextParams.enableCooperativeVectorInt8 = osSupportsCoopVec && g_options.enableCoopVecInt8;
-        contextParams.enableCooperativeVectorFP8 = osSupportsCoopVec && g_options.enableCoopVecFP8;
+        contextParams.enableCooperativeVector = osSupportsCoopVec && g_options.enableCoopVec;
     }
 
     ntc::ContextWrapper context;
@@ -1876,13 +1856,10 @@ int main(int argc, const char** argv)
 
     if (useGapi)
     {
-        printf("Using %s with %s API. DP4a [%c], FP16 [%c], CoopVec-Int8 [%c], CoopVec-FP8 [%c]\n",
+        printf("Using %s with %s API. CoopVec [%c]\n",
             deviceManager->GetRendererString(),
             nvrhi::utils::GraphicsAPIToString(deviceManager->GetGraphicsAPI()),
-            contextParams.graphicsDeviceSupportsDP4a ? 'Y' : 'N',
-            contextParams.graphicsDeviceSupportsFloat16 ? 'Y' : 'N',
-            context->IsCooperativeVectorInt8Supported() ? 'Y' : 'N',
-            context->IsCooperativeVectorFP8Supported() ? 'Y' : 'N');
+            context->IsCooperativeVectorSupported() ? 'Y' : 'N');
     }
 
     if (graphicsDecompressMode || describeMode)
@@ -2096,19 +2073,23 @@ int main(int argc, const char** argv)
 
         if (g_options.decompress)
         {
-            if (g_options.compress && textureSet->IsInferenceWeightTypeSupported(ntc::InferenceWeightType::GenericFP8))
+            if (g_options.compress)
             {
-                if (!DecompressTextureSet(context, textureSet, /* useFP8Weights = */ true))
+                if (!DecompressTextureSet(context, textureSet, /* useInt8Weights = */ true))
                     return 1;
             }
 
-            if (!DecompressTextureSet(context, textureSet, /* useFP8Weights = */ false))
+            if (!DecompressTextureSet(context, textureSet, /* useInt8Weights = */ false))
                 return 1;
         }
 
         if (g_options.optimizeBC || g_options.saveImagesPath && anyBCTextures)
         {
-            if (!CopyTextureSetDataIntoGraphicsTextures(context, textureSet, ntc::TextureDataPage::Output,
+            ntc::TextureDataPage const sourcePage = g_options.decompress
+                ? ntc::TextureDataPage::Output
+                : ntc::TextureDataPage::Reference;
+                
+            if (!CopyTextureSetDataIntoGraphicsTextures(context, textureSet, sourcePage,
                 /* allMipLevels = */ true, /* onlyBlockCompressedFormats = */ true, graphicsResources))
                 return 1;
         }
@@ -2137,6 +2118,17 @@ int main(int argc, const char** argv)
         {
             if (!SaveCompressedTextureSet(context, textureSet))
                 return 1;
+        }
+        else if (g_options.compress)
+        {
+            size_t estimatedSize;
+            if (ntc::EstimateCompressedTextureSetSize(textureSet->GetDesc(), textureSet->GetLatentShape(),
+                estimatedSize) == ntc::Status::Ok)
+            {
+                size_t const texturePixels = GetTextureSetPixelCount(textureSet);
+                float const bpp = 8.f * float(estimatedSize) / float(texturePixels);
+                printf("Estimated file size: %zu bytes, %.2f bits per pixel.\n", estimatedSize, bpp);
+            }
         }
     }
 

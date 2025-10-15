@@ -28,9 +28,14 @@
 using namespace donut;
 namespace fs = std::filesystem;
 
-static const uint32_t g_maxTileStagingTextures = 6; // Match number of textures in donut::engine::Material
+// Matches the number of textures in donut::engine::Material
+static const uint32_t g_maxTileStagingTextures = 6;
 
-bool NtcMaterialLoader::Init(bool enableCoopVecInt8, bool enableCoopVecFP8, nvrhi::ITexture* dummyTexture)
+// Skip this many largest latent mips when loading texture sets.
+// Set to nonzero for testing purposes.
+static const int g_firstLatentMipInTexture = 0;
+
+bool NtcMaterialLoader::Init(bool enableCoopVec, nvrhi::ITexture* dummyTexture)
 {
     ntc::ContextParameters contextParams;
     contextParams.cudaDevice = ntc::DisableCudaDevice;
@@ -46,10 +51,7 @@ bool NtcMaterialLoader::Init(bool enableCoopVecInt8, bool enableCoopVecFP8, nvrh
     contextParams.vkInstance = m_device->getNativeObject(nvrhi::ObjectTypes::VK_Instance);
     contextParams.vkPhysicalDevice = m_device->getNativeObject(nvrhi::ObjectTypes::VK_PhysicalDevice);
     contextParams.vkDevice = m_device->getNativeObject(nvrhi::ObjectTypes::VK_Device);
-    contextParams.graphicsDeviceSupportsDP4a = IsDP4aSupported(m_device);
-    contextParams.graphicsDeviceSupportsFloat16 = IsFloat16Supported(m_device);
-    contextParams.enableCooperativeVectorInt8 = osSupportsCoopVec && enableCoopVecInt8;
-    contextParams.enableCooperativeVectorFP8 = osSupportsCoopVec && enableCoopVecFP8;
+    contextParams.enableCooperativeVector = osSupportsCoopVec && enableCoopVec;
 
     ntc::Status ntcStatus = ntc::CreateContext(m_ntcContext.ptr(), contextParams);
     if (ntcStatus != ntc::Status::Ok && ntcStatus != ntc::Status::CudaUnavailable)
@@ -59,8 +61,7 @@ bool NtcMaterialLoader::Init(bool enableCoopVecInt8, bool enableCoopVecFP8, nvrh
         return false;
     }
 
-    m_coopVecInt8 = m_ntcContext->IsCooperativeVectorInt8Supported();
-    m_coopVecFP8 = m_ntcContext->IsCooperativeVectorFP8Supported();
+    m_coopVec = m_ntcContext->IsCooperativeVectorSupported();
 
     m_dummyTexture = std::make_shared<engine::LoadedTexture>();
     m_dummyTexture->texture = dummyTexture;
@@ -385,8 +386,6 @@ static bool LoadMaterialFile(donut::engine::FilePathOrInlineData const& source, 
         return false;
     }
 
-    material.networkVersion = textureSetMetadata->GetNetworkVersion();
-
     return true;
 }
 
@@ -469,6 +468,9 @@ bool NtcMaterialLoader::TranscodeTiles(const std::vector<TranscodeTileInfo>& til
 
     // Phase 2 - Run NTC decompression
 
+    static_assert(TRANSCODE_BATCH_SIZE <= 32, "successfulTilesMask assumes no more than 32 tiles per batch");
+    uint32_t successfulTilesMask = 0;
+
     uint32_t colorTextureIndex = 0;
     uint32_t blockTextureIndex = 0;
     for (size_t tileIndex = 0; tileIndex < tiles.size(); ++tileIndex)
@@ -485,10 +487,10 @@ bool NtcMaterialLoader::TranscodeTiles(const std::vector<TranscodeTileInfo>& til
         assert(textureCount <= g_maxTileStagingTextures); // Maximum number of textures supported
 
         // Make sure that the latent and weight buffers have already been created
-        assert(material.ntcLatentsBuffer);
+        assert(material.ntcLatentsTexture);
         assert(material.ntcWeightsBuffer);
 
-        m_graphicsDecompressionPass->SetInputBuffer(material.ntcLatentsBuffer);
+        m_graphicsDecompressionPass->SetLatentTexture(material.ntcLatentsTexture);
         m_graphicsDecompressionPass->SetWeightBuffer(material.ntcWeightsBuffer);
 
         ntc::Rect rectDecompress;
@@ -515,9 +517,9 @@ bool NtcMaterialLoader::TranscodeTiles(const std::vector<TranscodeTileInfo>& til
 
         ntc::MakeDecompressionComputePassParameters decompressionParams;
         decompressionParams.textureSetMetadata = textureSetMetadata;
-        decompressionParams.latentStreamRange = material.latentStreamRange;
         decompressionParams.mipLevel = tileInfo.mip;
         decompressionParams.firstOutputDescriptorIndex = 0;
+        decompressionParams.firstLatentMipInTexture = g_firstLatentMipInTexture;
         decompressionParams.pOutputTextures = outputTextureDescs.data();
         decompressionParams.numOutputTextures = textureCount;
         decompressionParams.weightType = ntc::InferenceWeightType(material.weightType);
@@ -529,10 +531,12 @@ bool NtcMaterialLoader::TranscodeTiles(const std::vector<TranscodeTileInfo>& til
         {
             log::warning("Failed to make a decompression pass for material '%s' mip %d, error code = %s: %s",
                 material.name.c_str(), tileInfo.mip, ntc::StatusToString(ntcStatus), ntc::GetLastErrorMessage());
-            return false;
+            continue;
         }
 
         m_graphicsDecompressionPass->ExecuteComputePass(commandList, decompressionPass);
+
+        successfulTilesMask |= (1 << tileIndex);
     }
 
     commandList->endMarker();
@@ -546,6 +550,9 @@ bool NtcMaterialLoader::TranscodeTiles(const std::vector<TranscodeTileInfo>& til
     blockTextureIndex = 0;
     for (size_t tileIndex = 0; tileIndex < tiles.size(); ++tileIndex)
     {
+        if ((successfulTilesMask & (1 << tileIndex)) == 0)
+            continue;
+            
         const TranscodeTileInfo& transcodeTile = tiles[tileIndex];
         const nvfeedback::FeedbackTextureTileInfo tileInfo = transcodeTile.tileInfo;
         const NtcMaterial& material = *transcodeTile.material;
@@ -567,6 +574,9 @@ bool NtcMaterialLoader::TranscodeTiles(const std::vector<TranscodeTileInfo>& til
     blockTextureIndex = 0;
     for (size_t tileIndex = 0; tileIndex < tiles.size(); ++tileIndex)
     {
+        if ((successfulTilesMask & (1 << tileIndex)) == 0)
+            continue;
+            
         const TranscodeTileInfo& transcodeTile = tiles[tileIndex];
         const nvfeedback::FeedbackTextureTileInfo tileInfo = transcodeTile.tileInfo;
         const NtcMaterial& material = *transcodeTile.material;
@@ -630,6 +640,9 @@ bool NtcMaterialLoader::TranscodeTiles(const std::vector<TranscodeTileInfo>& til
     blockTextureIndex = 0;
     for (size_t tileIndex = 0; tileIndex < tiles.size(); ++tileIndex)
     {
+        if ((successfulTilesMask & (1 << tileIndex)) == 0)
+            continue;
+            
         const TranscodeTileInfo& transcodeTile = tiles[tileIndex];
         const nvfeedback::FeedbackTextureTileInfo tileInfo = transcodeTile.tileInfo;
         const NtcMaterial& material = *transcodeTile.material;
@@ -658,6 +671,9 @@ bool NtcMaterialLoader::TranscodeTiles(const std::vector<TranscodeTileInfo>& til
     blockTextureIndex = 0;
     for (size_t tileIndex = 0; tileIndex < tiles.size(); ++tileIndex)
     {
+        if ((successfulTilesMask & (1 << tileIndex)) == 0)
+            continue;
+            
         const TranscodeTileInfo& transcodeTile = tiles[tileIndex];
         const nvfeedback::FeedbackTextureTileInfo tileInfo = transcodeTile.tileInfo;
         const NtcMaterial& material = *transcodeTile.material;
@@ -846,10 +862,10 @@ bool NtcMaterialLoader::TranscodeMaterial(ntc::IStream* ntcFile, ntc::ITextureSe
     // Phase 2 - Run NTC decompression
 
     // Make sure that the latent and weight buffers have already been created
-    assert(material.ntcLatentsBuffer);
+    assert(material.ntcLatentsTexture);
     assert(material.ntcWeightsBuffer);
 
-    m_graphicsDecompressionPass->SetInputBuffer(material.ntcLatentsBuffer);
+    m_graphicsDecompressionPass->SetLatentTexture(material.ntcLatentsTexture);
     m_graphicsDecompressionPass->SetWeightBuffer(material.ntcWeightsBuffer);
 
     // Pre-fill the OutputTextureDesc array for decoding of all mip levels
@@ -866,16 +882,17 @@ bool NtcMaterialLoader::TranscodeMaterial(ntc::IStream* ntcFile, ntc::ITextureSe
         outputDesc.ditherScale = 1.f / 255.f;
     }
 
+    uint32_t successfulMipLevelMask = 0;
     for (int mipLevel = 0; mipLevel < textureSetDesc.mips; ++mipLevel)
     {
         // Obtain the description of the decompression pass from LibNTC.
         // The description includes the shader code, weights, and constants.
         ntc::MakeDecompressionComputePassParameters decompressionParams;
         decompressionParams.textureSetMetadata = textureSetMetadata;
-        decompressionParams.latentStreamRange = material.latentStreamRange;
         decompressionParams.mipLevel = mipLevel;
         // This index is added to descriptorIndex from the outputTextureDescs array, so the indexing math works out
         decompressionParams.firstOutputDescriptorIndex = mipLevel;
+        decompressionParams.firstLatentMipInTexture = g_firstLatentMipInTexture;
         decompressionParams.pOutputTextures = outputTextureDescs.data();
         decompressionParams.numOutputTextures = int(outputTextureDescs.size());
         decompressionParams.weightType = ntc::InferenceWeightType(material.weightType);
@@ -885,12 +902,14 @@ bool NtcMaterialLoader::TranscodeMaterial(ntc::IStream* ntcFile, ntc::ITextureSe
         {
             log::warning("Failed to make a decompression pass for material '%s' mip %d, error code = %s: %s",
                 material.name.c_str(), mipLevel, ntc::StatusToString(ntcStatus), ntc::GetLastErrorMessage());
-            return false;
+            continue;
         }
 
         // Execute the compute pass to decompress the texture.
         // Note: ExecuteComputePass is application code (not LibNTC) and it caches PSOs based on shader code pointers.
         m_graphicsDecompressionPass->ExecuteComputePass(commandList, decompressionPass);
+
+        successfulMipLevelMask |= (1 << mipLevel);
     }
 
     // Phase 3 - Compress all mips of the color textures into BCn, where necessary
@@ -904,6 +923,9 @@ bool NtcMaterialLoader::TranscodeMaterial(ntc::IStream* ntcFile, ntc::ITextureSe
         
         for (int mipLevel = 0; mipLevel < textureSetDesc.mips; ++mipLevel)
         {
+            if ((successfulMipLevelMask & (1 << mipLevel)) == 0)
+                continue; // This mip level was not decompressed successfully, skip BCn compression
+
             int const mipWidth = std::max(textureSetDesc.width >> mipLevel, 1);
             int const mipHeight = std::max(textureSetDesc.height >> mipLevel, 1);
 
@@ -1044,16 +1066,14 @@ bool NtcMaterialLoader::PrepareMaterialForInferenceOnSample(ntc::IStream* ntcFil
     ntc::ITextureSetMetadata* textureSetMetadata, NtcMaterial& material, nvrhi::ICommandList* commandList)
 {
     ntc::InferenceWeightType weightType;
-    if (m_coopVecFP8 && textureSetMetadata->IsInferenceWeightTypeSupported(ntc::InferenceWeightType::CoopVecFP8))
+    if (m_coopVec && textureSetMetadata->IsInferenceWeightTypeSupported(ntc::InferenceWeightType::CoopVecFP8))
         weightType = ntc::InferenceWeightType::CoopVecFP8;
-    else if (m_coopVecInt8 && textureSetMetadata->IsInferenceWeightTypeSupported(ntc::InferenceWeightType::CoopVecInt8))
-        weightType = ntc::InferenceWeightType::CoopVecInt8;
     else
         weightType = ntc::InferenceWeightType::GenericInt8;
 
     ntc::InferenceData inferenceData;
-    ntc::Status ntcStatus = m_ntcContext->MakeInferenceData(textureSetMetadata, material.latentStreamRange,
-        weightType, &inferenceData);
+    ntc::Status ntcStatus = m_ntcContext->MakeInferenceData(textureSetMetadata, weightType,
+        g_firstLatentMipInTexture, &inferenceData);
 
     if (ntcStatus != ntc::Status::Ok)
     {
@@ -1095,27 +1115,54 @@ bool NtcMaterialLoader::PrepareMaterialForInferenceOnSample(ntc::IStream* ntcFil
     if (!material.ntcWeightsBuffer)
         return false;
 
-    nvrhi::BufferDesc latentBufferDesc = nvrhi::BufferDesc()
-        .setByteSize(material.latentStreamRange.size)
-        .setCanHaveRawViews(true)
+    ntc::LatentTextureDesc const latentTextureDescSrc = textureSetMetadata->GetLatentTextureDesc();
+
+    nvrhi::TextureDesc latentTextureDesc = nvrhi::TextureDesc()
+        .setDebugName(material.name + " latents")
+        .setDimension(nvrhi::TextureDimension::Texture2DArray)
+        .setFormat(nvrhi::Format::BGRA4_UNORM)
+        .setWidth(std::max(latentTextureDescSrc.width >> g_firstLatentMipInTexture, 1))
+        .setHeight(std::max(latentTextureDescSrc.height >> g_firstLatentMipInTexture, 1))
+        .setArraySize(latentTextureDescSrc.arraySize)
+        .setMipLevels(std::max(latentTextureDescSrc.mipLevels - g_firstLatentMipInTexture, 1))
         .setInitialState(nvrhi::ResourceStates::ShaderResource)
-        .setKeepInitialState(true)
-        .setDebugName(material.name + " latents");
-    material.ntcLatentsBuffer = m_device->createBuffer(latentBufferDesc);
-    if (!material.ntcLatentsBuffer)
+        .setKeepInitialState(true);
+    material.ntcLatentsTexture = m_device->createTexture(latentTextureDesc);
+    if (!material.ntcLatentsTexture)
         return false;
 
     std::vector<uint8_t> latentData;
-    latentData.resize(material.latentStreamRange.size);
-
-    ntcFile->Seek(material.latentStreamRange.offset);
-    if (!ntcFile->Read(latentData.data(), latentData.size()))
+    for (int mipLevel = g_firstLatentMipInTexture; mipLevel < latentTextureDescSrc.mipLevels; ++mipLevel)
     {
-        log::warning("Failed to read latents for material '%s'", material.name.c_str());
-        return false;
+        ntc::LatentTextureFootprint footprint;
+        ntc::Status ntcStatus = textureSetMetadata->GetLatentTextureFootprint(mipLevel, footprint);
+        if (ntcStatus != ntc::Status::Ok)
+        {
+            log::warning("Failed to get latent texture footprint for material '%s' mip %d, error code = %s: %s",
+                material.name.c_str(), mipLevel, ntc::StatusToString(ntcStatus), ntc::GetLastErrorMessage());
+            return false;
+        }
+
+        latentData.resize(footprint.range.size);
+
+        ntcFile->Seek(footprint.range.offset);
+        if (!ntcFile->Read(latentData.data(), latentData.size()))
+        {
+            log::warning("Failed to read latents for material '%s'", material.name.c_str());
+            return false;
+        }
+        
+        uint8_t const* srcData = latentData.data();
+
+        for (int layerIndex = 0; layerIndex < latentTextureDescSrc.arraySize; ++layerIndex)
+        {
+            commandList->writeTexture(material.ntcLatentsTexture, layerIndex, mipLevel - g_firstLatentMipInTexture,
+                srcData, footprint.rowPitch);
+
+            srcData += footprint.slicePitch;
+        }
     }
 
-    commandList->writeBuffer(material.ntcLatentsBuffer, latentData.data(), latentData.size());
     commandList->writeBuffer(material.ntcConstantBuffer, &inferenceData.constants,
         sizeof(inferenceData.constants));
 
@@ -1161,10 +1208,11 @@ bool NtcMaterialLoader::PrepareMaterialForInferenceOnSample(ntc::IStream* ntcFil
     if (material.transmissionTexture)
         material.transmissionTexture->texture = m_dummyTexture->texture;
 
-    material.ntcMemorySize =
-        m_device->getBufferMemoryRequirements(material.ntcConstantBuffer).size + 
-        m_device->getBufferMemoryRequirements(material.ntcWeightsBuffer).size + 
-        m_device->getBufferMemoryRequirements(material.ntcLatentsBuffer).size;
+    size_t const constantBufferSize = m_device->getBufferMemoryRequirements(material.ntcConstantBuffer).size;
+    size_t const weightsBufferSize = m_device->getBufferMemoryRequirements(material.ntcWeightsBuffer).size;
+    size_t const latentsTextureSize = m_device->getTextureMemoryRequirements(material.ntcLatentsTexture).size;
+
+    material.ntcMemorySize = constantBufferSize + weightsBufferSize + latentsTextureSize;
     
     material.weightType = int(weightType);
     ++m_weightTypeHistogram[int(weightType)];
@@ -1250,9 +1298,7 @@ bool NtcMaterialLoader::LoadMaterialsForScene(donut::engine::Scene& scene, std::
             // but not the entire material: some flags or parameters might be different.
             ntcMaterial->ntcConstantBuffer = previouslyLoadedMaterial->ntcConstantBuffer;
             ntcMaterial->ntcWeightsBuffer = previouslyLoadedMaterial->ntcWeightsBuffer;
-            ntcMaterial->ntcLatentsBuffer = previouslyLoadedMaterial->ntcLatentsBuffer;
-            ntcMaterial->latentStreamRange = previouslyLoadedMaterial->latentStreamRange;
-            ntcMaterial->networkVersion = previouslyLoadedMaterial->networkVersion;
+            ntcMaterial->ntcLatentsTexture = previouslyLoadedMaterial->ntcLatentsTexture;
             ntcMaterial->weightType = previouslyLoadedMaterial->weightType;
             ntcMaterial->baseOrDiffuseTexture = previouslyLoadedMaterial->baseOrDiffuseTexture;
             ntcMaterial->metalRoughOrSpecularTexture = previouslyLoadedMaterial->metalRoughOrSpecularTexture;
@@ -1292,19 +1338,10 @@ bool NtcMaterialLoader::LoadMaterialsForScene(donut::engine::Scene& scene, std::
 
         ntc::ITextureSetMetadata* textureSetMetadata = *ntcMaterial->textureSetMetadata;
 
-        // Obtain the stream range for latents covering all mip levels of the material.
-        ntc::Status ntcStatus = textureSetMetadata->GetStreamRangeForLatents(0, textureSetMetadata->GetDesc().mips,
-            ntcMaterial->latentStreamRange);
-        if (ntcStatus != ntc::Status::Ok)
-        {
-            log::warning("Cannot process material '%s', call to GetStreamRangeForLatents failed, error code = %s: %s",
-                ntcMaterial->name.c_str(), ntc::StatusToString(ntcStatus), ntc::GetLastErrorMessage());
-        }
-
         m_commandList->open();
         bool loadedSuccessfully = true;
 
-        ntcStatus = textureSetMetadata->ShuffleInferenceOutputs(channelMap.swizzle.data());
+        ntc::Status ntcStatus = textureSetMetadata->ShuffleInferenceOutputs(channelMap.swizzle.data());
         if (ntcStatus != ntc::Status::Ok)
         {
             log::warning("Cannot process material '%s', call to ShuffleInferenceOutputs failed, error code = %s: %s",

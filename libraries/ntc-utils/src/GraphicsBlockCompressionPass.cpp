@@ -11,6 +11,7 @@
  */
 
 #include <ntc-utils/GraphicsBlockCompressionPass.h>
+#include <libntc/shaders/Bindings.h>
 
 bool GraphicsBlockCompressionPass::Init()
 {
@@ -25,11 +26,11 @@ bool GraphicsBlockCompressionPass::Init()
     auto bindingLayoutDesc = nvrhi::BindingLayoutDesc()
         .setVisibility(nvrhi::ShaderType::Compute)
         .setBindingOffsets(vulkanBindingOffsets)
-        .addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0))
-        .addItem(nvrhi::BindingLayoutItem::Texture_SRV(1))
-        .addItem(nvrhi::BindingLayoutItem::Texture_UAV(2));
+        .addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(NTC_BINDING_BC_CONSTANT_BUFFER))
+        .addItem(nvrhi::BindingLayoutItem::Texture_SRV(NTC_BINDING_BC_INPUT_TEXTURE))
+        .addItem(nvrhi::BindingLayoutItem::Texture_UAV(NTC_BINDING_BC_OUTPUT_TEXTURE));
     if (m_useAccelerationBuffer)
-        bindingLayoutDesc.addItem(nvrhi::BindingLayoutItem::RawBuffer_UAV(3));
+        bindingLayoutDesc.addItem(nvrhi::BindingLayoutItem::RawBuffer_UAV(NTC_BINDING_BC_ACCELERATION_BUFFER));
 
     m_bindingLayout = m_device->createBindingLayout(bindingLayoutDesc);
     if (!m_bindingLayout)
@@ -79,14 +80,14 @@ bool GraphicsBlockCompressionPass::ExecuteComputePass(nvrhi::ICommandList* comma
 
     nvrhi::BindingSetDesc bindingSetDesc;
     bindingSetDesc
-        .addItem(nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer))
-        .addItem(nvrhi::BindingSetItem::Texture_SRV(1, inputTexture, inputFormat)
+        .addItem(nvrhi::BindingSetItem::ConstantBuffer(NTC_BINDING_BC_CONSTANT_BUFFER, m_constantBuffer))
+        .addItem(nvrhi::BindingSetItem::Texture_SRV(NTC_BINDING_BC_INPUT_TEXTURE, inputTexture, inputFormat)
             .setSubresources(nvrhi::TextureSubresourceSet().setBaseMipLevel(inputMipLevel)))
-        .addItem(nvrhi::BindingSetItem::Texture_UAV(2, outputTexture)
+        .addItem(nvrhi::BindingSetItem::Texture_UAV(NTC_BINDING_BC_OUTPUT_TEXTURE, outputTexture)
             .setSubresources(nvrhi::TextureSubresourceSet().setBaseMipLevel(outputMipLevel)));
     assert((accelerationBuffer != nullptr) == m_useAccelerationBuffer);
     if (accelerationBuffer)
-        bindingSetDesc.addItem(nvrhi::BindingSetItem::RawBuffer_UAV(3, accelerationBuffer));
+        bindingSetDesc.addItem(nvrhi::BindingSetItem::RawBuffer_UAV(NTC_BINDING_BC_ACCELERATION_BUFFER, accelerationBuffer));
 
     nvrhi::BindingSetHandle bindingSet = m_bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_bindingLayout);
     if (!bindingSet)

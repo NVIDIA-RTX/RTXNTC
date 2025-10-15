@@ -30,9 +30,10 @@ public:
 
     void WriteDescriptor(nvrhi::BindingSetItem item);
 
-    bool SetInputData(nvrhi::ICommandList* commandList, ntc::IStream* inputStream, ntc::StreamRange range);
+    bool SetLatentDataFromTextureSet(nvrhi::ICommandList* commandList, ntc::IStream* inputStream,
+        ntc::ITextureSetMetadata* textureSetMetadata);
 
-    void SetInputBuffer(nvrhi::IBuffer* buffer);
+    void SetLatentTexture(nvrhi::ITexture* texture);
 
     bool SetWeightsFromTextureSet(nvrhi::ICommandList* commandList, ntc::ITextureSetMetadata* textureSetMetadata,
         ntc::InferenceWeightType weightType);
@@ -51,10 +52,11 @@ private:
     nvrhi::BindingLayoutHandle m_bindlessLayout;
     donut::engine::BindingCache m_bindingCache;
     nvrhi::DescriptorTableHandle m_descriptorTable;
-    nvrhi::BufferHandle m_inputBuffer;
+    nvrhi::TextureHandle m_latentTexture;
     nvrhi::BufferHandle m_weightUploadBuffer;
     nvrhi::BufferHandle m_weightBuffer;
     nvrhi::BufferHandle m_constantBuffer;
-    bool m_inputBufferIsExternal = false;
+    nvrhi::SamplerHandle m_latentSampler;
+    bool m_latentTextureIsExternal = false;
     bool m_weightBufferIsExternal = false;
 };

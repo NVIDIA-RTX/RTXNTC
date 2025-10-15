@@ -39,7 +39,6 @@ parser.add_argument('--output', required = True, help = 'Path to the output dire
 parser.add_argument('--skipExisting', action = 'store_true', help = 'Skip materials where the NTC file already exists')
 parser.add_argument('--tool', default = defaultTool, help = f'Path to the ntc-cli executable, defaults to {defaultTool}')
 parser.add_argument('--verbose', action = 'store_true', help = 'Print the commands before executing them')
-parser.add_argument('--networkVersion', default='auto', help = 'Network version to use for all materials, small...xlarge or auto')
 parser.add_argument('--dryRun', action = 'store_true', help = 'Process materials and write manifest files, but do not compress')
 parser.add_argument('--args', help = 'Custom arguments for the compression tool')
 args = parser.parse_args()
@@ -394,7 +393,6 @@ for materialIndex in range(len(materialDefinitions)):
             graphicsApi='vk',
             loadManifest=matdef.manifestFileName,
             maxBitsPerPixel=args.maxBitsPerPixel,
-            networkVersion=args.networkVersion,
             optimizeBC=True,
             saveCompressed=matdef.ntcFileName,
             targetPsnr=args.targetPsnr,

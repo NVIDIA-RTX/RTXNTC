@@ -24,23 +24,14 @@ try:
 except ImportError:
     _OPEN_EXR_SUPPORTED = False
 
-_DP4A_SUPPORTED = False
-_FP16_SUPPORTED = False
-_COOPVEC_INT8_SUPPORTED = False
-_COOPVEC_FP8_SUPPORTED = False
+_COOPVEC_SUPPORTED = False
 
-FL_LEGACY = 0
-FL_DP4A = 1
-FL_FP16 = 2
-FL_COOPVEC_INT8 = 3
-FL_COOPVEC_FP8 = 4
+FL_DP4A = 0
+FL_COOPVEC = 1
 
 FL_STRINGS = {
-    FL_LEGACY: 'Legacy',
     FL_DP4A: 'DP4a',
-    FL_FP16: 'FP16',
-    FL_COOPVEC_INT8: 'CoopVecInt8',
-    FL_COOPVEC_FP8: 'CoopVecFP8'
+    FL_COOPVEC: 'CoopVec'
 }
 
 # add ../../libraries to the path to import ntc
@@ -162,7 +153,7 @@ class DescribeTestCase(TestCase):
         return 'Describe'
         
     def runTest(self):
-        ntcFileName = os.path.join(testFilesDir, f'PavingStones070_4bpp_small.ntc')
+        ntcFileName = os.path.join(testFilesDir, f'PavingStones070_5bpp.ntc')
 
         args = ntc.Arguments(
             tool=self.tool,
@@ -176,13 +167,9 @@ class DescribeTestCase(TestCase):
         self.assertEqual(result.dimensions, (2048, 2048))
         self.assertEqual(result.channels, 10)
         self.assertEqual(result.mipLevels, 1)
-        self.assertEqual(result.networkVersion, 'NTC_NETWORK_SMALL')
-
-        global _DP4A_SUPPORTED, _FP16_SUPPORTED, _COOPVEC_INT8_SUPPORTED, _COOPVEC_FP8_SUPPORTED
-        _DP4A_SUPPORTED = 'DP4a' in result.gpuFeatures
-        _FP16_SUPPORTED = 'FP16' in result.gpuFeatures
-        _COOPVEC_INT8_SUPPORTED = 'CoopVecInt8' in result.gpuFeatures
-        _COOPVEC_FP8_SUPPORTED = 'CoopVecFP8' in result.gpuFeatures
+        
+        global _COOPVEC_SUPPORTED
+        _COOPVEC_SUPPORTED = 'CoopVec' in result.gpuFeatures
 
 
 class CompressionTestCase(TestCase):
@@ -209,7 +196,7 @@ class CompressionTestCase(TestCase):
 
         self.assertTrue(os.path.exists(ntcFileName))
         self.assertEqual(result.bitsPerPixel, args.bitsPerPixel)
-        self.assertBetween(result.overallPsnr, 28, 32)
+        self.assertBetween(result.overallPsnr, 27, 30)
         self.assertIsNotNone(result.compressionRuns)
         self.assertEqual(len(result.compressionRuns), 1)
         self.assertEqual(len(result.compressionRuns[0].learningCurve), args.trainingSteps / args.stepsPerIteration)
@@ -227,8 +214,55 @@ class CompressionTestCase(TestCase):
 
         result = ntc.run(args)
 
-        self.compareOutputImages(sourceMaterialDir, decompressedDir, (33, 29, 39, 28, 35), toleranceDb=2.0)
+        self.compareOutputImages(sourceMaterialDir, decompressedDir, (32, 28, 38, 27, 35), toleranceDb=2.0)
 
+class DeterminismTestCase(TestCase):
+    def __str__(self):
+        return 'Determinism'
+    
+    def runTest(self):
+        sourceMaterialDir = os.path.join(sourceDir, 'PavingStones070')
+        ntcFileName1 = os.path.join(scratchDir, 'PavingStones070_1.ntc')
+        ntcFileName2 = os.path.join(scratchDir, 'PavingStones070_2.ntc')
+
+        args1 = ntc.Arguments(
+            tool=self.tool,
+            loadImages=sourceMaterialDir,
+            compress=True,
+            decompress=True,
+            bitsPerPixel=4.0,
+            stepsPerIteration=1000,
+            trainingSteps=10000,
+            saveCompressed=ntcFileName1,
+            stableTraining=True,
+            randomSeed=1234
+        )
+        result1 = ntc.run(args1)
+
+        args2 = ntc.Arguments(
+            tool=self.tool,
+            loadImages=sourceMaterialDir,
+            compress=True,
+            decompress=True,
+            bitsPerPixel=4.0,
+            stepsPerIteration=1000,
+            trainingSteps=10000,
+            saveCompressed=ntcFileName2,
+            stableTraining=True,
+            randomSeed=1234
+        )
+        result2 = ntc.run(args2)
+
+        self.assertBetween(result1.overallPsnr, 27, 30)
+        self.assertBetween(result2.overallPsnr, result1.overallPsnr - 0.05, result1.overallPsnr + 0.05)
+
+        self.assertTrue(os.path.exists(ntcFileName1))
+        self.assertTrue(os.path.exists(ntcFileName2))
+
+        with open(ntcFileName1, 'rb') as f1, open(ntcFileName2, 'rb') as f2:
+            ntcData1 = f1.read()
+            ntcData2 = f2.read()
+            self.assertEqual(ntcData1, ntcData2)
 
 class HdrCompressionTestCase(TestCase):
 
@@ -245,7 +279,7 @@ class HdrCompressionTestCase(TestCase):
             loadImages=sourceMaterialDir,
             compress=True,
             decompress=True,
-            bitsPerPixel=4.0,
+            bitsPerPixel=5.0,
             stepsPerIteration=1000,
             trainingSteps=10000,
             saveCompressed=ntcFileName,
@@ -256,7 +290,7 @@ class HdrCompressionTestCase(TestCase):
 
         self.assertTrue(os.path.exists(ntcFileName))
         self.assertEqual(result.bitsPerPixel, args.bitsPerPixel)
-        self.assertBetween(result.overallPsnr, 43, 46)
+        self.assertBetween(result.overallPsnr, 38, 40)
         self.assertIsNotNone(result.compressionRuns)
         self.assertEqual(len(result.compressionRuns), 1)
         self.assertEqual(len(result.compressionRuns[0].learningCurve), args.trainingSteps / args.stepsPerIteration)
@@ -285,34 +319,27 @@ class HdrCompressionTestCase(TestCase):
         # The reason is that we compute PSNR based on raw HDR data here. NTC, on the other hand, computes it
         # in the storage color space, which is HLG, and that gives a different answer. Doing HLG is numpy is very slow.
         # That is technically an NTC bug.
-        self.assertBetween(psnr, 40, 44)
+        self.assertBetween(psnr, 38, 42)
 
 
 class DecompressionTestCase(TestCase):
 
-    def __init__(self, api: str, networkVersion: str, featureLevel: int) -> None:
+    def __init__(self, api: str, featureLevel: int) -> None:
         super().__init__()
         self.api = api
-        self.networkVersion = networkVersion
         self.featureLevel = featureLevel
 
     def __str__(self):
-        return f'Decompression ({self.api}, {self.networkVersion} network, {FL_STRINGS[self.featureLevel]})'
+        return f'Decompression ({self.api}, {FL_STRINGS[self.featureLevel]})'
 
     def runTest(self):
         if self.api == 'dx12' and os.name != 'nt':
             self.skipTest('DX12 is only available on Windows')
-        if self.featureLevel >= FL_DP4A and not _DP4A_SUPPORTED:
-            self.skipTest('DP4a is not supported')
-        if self.featureLevel >= FL_FP16 and not _FP16_SUPPORTED:
-            self.skipTest('FP16 is not supported')
-        if self.featureLevel >= FL_COOPVEC_INT8 and not _COOPVEC_INT8_SUPPORTED:
-            self.skipTest('CoopVec-Int8 is not supported')
-        if self.featureLevel >= FL_COOPVEC_FP8 and not _COOPVEC_FP8_SUPPORTED:
-            self.skipTest('CoopVec-FP8 is not supported')
-        
+        if self.featureLevel >= FL_COOPVEC and not _COOPVEC_SUPPORTED:
+            self.skipTest('CoopVec is not supported')
+
         sourceMaterialDir = os.path.join(sourceDir, 'PavingStones070')
-        ntcFileName = os.path.join(testFilesDir, f'PavingStones070_4bpp_{self.networkVersion}.ntc')
+        ntcFileName = os.path.join(testFilesDir, f'PavingStones070_5bpp.ntc')
         decompressedDir = os.path.join(scratchDir, 'output')
     
         isCuda = self.api == 'cuda'
@@ -328,10 +355,7 @@ class DecompressionTestCase(TestCase):
         )
 
         if not isCuda:
-            args.noDP4a = self.featureLevel < FL_DP4A
-            args.noFloat16 = self.featureLevel < FL_FP16
-            args.noCoopVecInt8 = self.featureLevel != FL_COOPVEC_INT8
-            args.noCoopVecFP8 = self.featureLevel != FL_COOPVEC_FP8
+            args.noCoopVec = self.featureLevel != FL_COOPVEC
 
         result = ntc.run(args)
         
@@ -342,10 +366,7 @@ class DecompressionTestCase(TestCase):
         elif self.api == 'dx12':
             self.assertEqual(result.graphicsApi, 'D3D12')
         
-        if self.networkVersion in ('small', 'medium'):
-            expectedPsnr = (33.8, 29.8, 40.3, 29.6, 36.1)
-        else:
-            expectedPsnr = (34.3, 30.4, 40.4, 29.5, 35.8)
+        expectedPsnr = (34.3, 30.4, 40.0, 29.5, 35.8)
             
         self.compareOutputImages(sourceMaterialDir, decompressedDir, expectedPsnr, toleranceDb=1.5, ignoreExtraChannels=not isCuda)
         
@@ -355,15 +376,15 @@ if __name__ == '__main__':
     # Describe should go first because it also queries the GPU capabilities
     suite.addTest(DescribeTestCase())
     suite.addTest(CompressionTestCase())
+    suite.addTest(DeterminismTestCase())
     suite.addTest(HdrCompressionTestCase())
 
     for api in ('cuda', 'vk', 'dx12'):
-        for networkVersion in ('small', 'medium', 'large', 'xlarge'):
-            if api == 'cuda':
-                suite.addTest(DecompressionTestCase(api=api, networkVersion=networkVersion, featureLevel=FL_LEGACY))
-            else:
-                for featureLevel in (FL_LEGACY, FL_DP4A, FL_FP16, FL_COOPVEC_INT8, FL_COOPVEC_FP8):
-                    suite.addTest(DecompressionTestCase(api=api, networkVersion=networkVersion, featureLevel=featureLevel))
+        if api == 'cuda':
+            suite.addTest(DecompressionTestCase(api=api, featureLevel=FL_DP4A))
+        else:
+            for featureLevel in (FL_DP4A, FL_COOPVEC):
+                suite.addTest(DecompressionTestCase(api=api, featureLevel=featureLevel))
 
     runner = unittest.TextTestRunner(verbosity=2)
     runner.run(suite)

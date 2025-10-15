@@ -50,10 +50,7 @@ def get_default_tool_path():
 @dataclass
 class LatentShape:
     gridSizeScale: int
-    highResFeatures: int
-    highResQuantBits: int
-    lowResFeatures: int
-    lowResQuantBits: int
+    numFeatures: int
 
 @dataclass
 class Arguments:
@@ -73,10 +70,6 @@ class Arguments:
 
     # Inverse feature toggles - these map to '--no-coopVec' etc.
     noCoopVec: bool = False
-    noCoopVecInt8: bool = False
-    noCoopVecFP8: bool = False
-    noDP4a: bool = False
-    noFloat16: bool = False
     
     # All the below parameters are passed directly as command line arguments to ntc-cli
     adapter: Optional[int] = None
@@ -110,7 +103,6 @@ class Arguments:
     maxBitsPerPixel: Optional[float] = None
     minBcPsnr: Optional[float] = None
     networkLearningRate: Optional[float] = None
-    networkVersion: str = ''
     optimizeBC: bool = False
     randomSeed: Optional[int] = None
     saveCompressed: str = ''
@@ -137,14 +129,6 @@ class Arguments:
                 elif value != '': raise ValueError(f'Unrecognized graphicsApi = {value}')
             elif name == 'noCoopVec':
                 if value: result.append('--no-coopVec')
-            elif name == 'noCoopVecInt8':
-                if value: result.append('--no-coopVecInt8')
-            elif name == 'noCoopVecFP8':
-                if value: result.append('--no-coopVecFP8')
-            elif name == 'noDP4a':
-                if value: result.append('--no-dp4a')
-            elif name == 'noFloat16':
-                if value: result.append('--no-float16')
             else:
                 # Generic fields - decide what to do based on the data type
                 if value is None or value == '':
@@ -187,14 +171,13 @@ class Result:
     savedFileBpp: Optional[float] = None
     gpuName: str = ''
     graphicsApi: str = ''
-    gpuFeatures: Optional[List[str]] = None # may contain 'DP4a', 'FP16', 'CoopVecInt8', 'CoopVecFP8'
+    gpuFeatures: Optional[List[str]] = None # may contain 'CoopVec'
 
     # describe command output:
     dimensions: Optional[Tuple[int, int]] = None # (width, height)
     channels: Optional[int] = None
     mipLevels: Optional[int] = None
     latentShape: Optional[LatentShape] = None # also available when using --compress --bitsPerPixel <bpp>
-    networkVersion: str = '' # 'NTC_NETWORK_..'
     # TODO: add texture info
 
 @dataclass
@@ -233,15 +216,13 @@ _bcQualityRegex = Regex(r'Combined BCn PSNR: (?P<psnr>[0-9\.]+|inf) dB, bit rate
 _cudaDecompressionTimeRegex = Regex(r'CUDA decompression time: (?P<milliseconds>[0-9\.]+) ms')
 _dimensionsRegex = Regex(r'Dimensions: (?P<width>\d+)x(?P<height>\d+), (?P<channels>\d+) channels, (?P<mipLevels>\d+) mip level\(s\)')
 _experimentRegex = Regex(r'Experiment (?P<index>\d+): (?P<bpp>[0-9\.]+) bpp')
-_fileSizeRegex = Regex(r'File size: (?P<bytes>\d+) bytes, (?P<bpp>[0-9\.]+) bits per pixel')
+_fileSizeRegex = Regex(r'(Estimated file|File) size: (?P<bytes>\d+) bytes, (?P<bpp>[0-9\.]+) bits per pixel')
 _graphicsDecompressionTimeRegex = Regex(r'Median decompression time over \d+ iterations: (?P<milliseconds>[0-9\.]+) ms')
-_latentShapeRegex = Regex(r'Latent shape: --gridSizeScale (?P<gss>\d+) --highResFeatures (?P<hrf>\d+) '
-                         r'--lowResFeatures (?P<lrf>\d+) --highResQuantBits (?P<hrqb>\d+) --lowResQuantBits (?P<lrqb>\d+)')
+_latentShapeRegex = Regex(r'Latent shape: --gridSizeScale (?P<gss>\d+) --numFeatures (?P<nf>\d+)')
 _mipRegex = Regex(r'MIP\s+(?P<mipLevel>\d+)\s+PSNR: (?P<psnr>[0-9\.]+|inf) dB')
-_networkVersionRegex = Regex(r'Network version: (?P<version>[A-Z_]+)')
 _overallPsnrRegex = Regex(r'Overall PSNR \((?P<type>\w+) weights\): (?P<psnr>[0-9\.]+|inf) dB')
 _stepRegex = Regex(r'Training: (?P<steps>\d+) steps, (?P<milliseconds>[0-9\.]+) ms/step, intermediate PSNR: (?P<psnr>[0-9\.]+|inf) dB')
-_systemRegex = Regex(r'Using (?P<gpu>.+) with (?P<api>.+) API\. DP4a \[(?P<dp4a>[YN])\], FP16 \[(?P<fp16>[YN])\], CoopVec-Int8 \[(?P<coopVecInt8>[YN])\], CoopVec-FP8 \[(?P<coopVecFP8>[YN])\]')
+_systemRegex = Regex(r'Using (?P<gpu>.+) with (?P<api>.+) API\. CoopVec \[(?P<coopVec>[YN])\]')
 
 
 def run(args: Arguments) -> Result:
@@ -296,15 +277,11 @@ def run(args: Arguments) -> Result:
             result.decompressionTime = float(m.milliseconds)
 
         elif m := _latentShapeRegex.parse(line):
-            result.latentShape = LatentShape(gridSizeScale=int(m.gss), highResFeatures=int(m.hrf),
-                lowResFeatures=int(m.lrf), highResQuantBits=int(m.hrqb), lowResQuantBits=int(m.lrqb))
+            result.latentShape = LatentShape(gridSizeScale=int(m.gss), numFeatures=int(m.nf))
 
         elif m := _mipRegex.parse(line):
             result.perMipPsnr = _create_or_append_list(result.perMipPsnr, float(m.psnr))
 
-        elif m := _networkVersionRegex.parse(line):
-            result.networkVersion = m.version
-            
         elif m := _overallPsnrRegex.parse(line):
             if m.type == 'FP8':
                 result.overallPsnrFP8 = float(m.psnr)
@@ -319,10 +296,7 @@ def run(args: Arguments) -> Result:
             result.gpuName = m.gpu
             result.graphicsApi = m.api
             result.gpuFeatures = []
-            if m.dp4a == 'Y': result.gpuFeatures.append('DP4a')
-            if m.fp16 == 'Y': result.gpuFeatures.append('FP16')
-            if m.coopVecInt8 == 'Y': result.gpuFeatures.append('CoopVecInt8')
-            if m.coopVecFP8 == 'Y': result.gpuFeatures.append('CoopVecFP8')
+            if m.coopVec == 'Y': result.gpuFeatures.append('CoopVec')
         
     if compressionRun.learningCurve:
         result.compressionRuns = _create_or_append_list(result.compressionRuns, compressionRun)

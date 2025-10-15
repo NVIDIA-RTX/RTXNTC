@@ -28,15 +28,14 @@ Texture sets are created with storage for color data, but without storage for an
 ```c++
 // Pick the compression settings automatically from a target BPP value.
 // You can adjust the latent shape directly, but the parameter space is huge with many similar options.
-float requestedBitsPerPixel = 4.0f; // Or something else
-int networkVersion = NTC_NETWORK_UNKNOWN; // Not specifying the network version for simplicity
+float requestedBitsPerPixel = 5.0f; // Or something else
 float actualBpp;
 ntc::LatentShape latentShape;
-ntc::Status ntcStatus = ntc::PickLatentShape(requestedBitsPerPixel, networkVersion, actualBpp, latentShape);
+ntc::Status ntcStatus = ntc::PickLatentShape(requestedBitsPerPixel, actualBpp, latentShape);
 if (ntcStatus != ntc::Status::Ok)
     // Handle the error;
 
-ntcStatus = textureSet->SetLatentShape(latentShape, networkVersion);
+ntcStatus = textureSet->SetLatentShape(latentShape);
 if (ntcStatus != ntc::Status::Ok)
     // Handle the error;
 ```
@@ -153,11 +152,7 @@ if (ntcStatus != ntc::Status::Ok)
 Then, initialize the session with search parameters:
 
 ```c++
-// Let's constrain the configuration search to include only configs compatible with the "medium" network size,
-// so that all our materials can use the same shader version. Use 'NTC_NETWORK_UNKNOWN' for automatic selection.
-int const networkVersion = NTC_NETWORK_MEDIUM;
-
-session->Reset(targetPsnr, maxBitsPerPixel, networkVersion);
+session->Reset(targetPsnr, maxBitsPerPixel);
 ```
 
 After that, perform the compression loop, serializing every compression result into a vector in memory and storing those results. This is necessary because the optimal result will not necessarily be achieved on the last compression run, and storing intermediate results is much faster than re-running the compression again with optimal parameters.
@@ -174,7 +169,7 @@ while (!session->Finished())
     // Resize the latents in the texture set.
     // The texture set needs some latent shape when it is created,
     // but when doing adaptive compression, that shape doesn't matter.
-    ntcStatus = textureSet->SetLatentShape(latentShape, networkVersion);
+    ntcStatus = textureSet->SetLatentShape(latentShape);
     if (ntcStatus != ntc::Status::Ok)
         // Handle the error.
 

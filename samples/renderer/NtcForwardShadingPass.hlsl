@@ -12,13 +12,7 @@
 
 #include "ForwardShadingCommon.hlsli"
 
-// Include the constants header unconditionally so that NTC_NETWORK_UNKNOWN is always defined
-#include "libntc/shaders/InferenceConstants.h"
-// Include other NTC headers only if there is actually a texture to decompress
-#if NETWORK_VERSION != NTC_NETWORK_UNKNOWN
 #include "libntc/shaders/Inference.hlsli"
-typedef NtcNetworkParams<NETWORK_VERSION> NtcParams;
-#endif
 
 #define STF_SHADER_STAGE STF_SHADER_STAGE_PIXEL
 #define STF_SHADER_MODEL_MAJOR 6
@@ -31,11 +25,12 @@ DECLARE_CBUFFER(MaterialConstants, g_Material, FORWARD_BINDING_MATERIAL_CONSTANT
 DECLARE_CBUFFER(ForwardShadingViewConstants, g_ForwardView, FORWARD_BINDING_VIEW_CONSTANTS, FORWARD_SPACE_VIEW);
 DECLARE_CBUFFER(ForwardShadingLightConstants, g_ForwardLight, FORWARD_BINDING_LIGHT_CONSTANTS, FORWARD_SPACE_SHADING);
 DECLARE_CBUFFER(NtcForwardShadingPassConstants, g_Pass, FORWARD_BINDING_NTC_PASS_CONSTANTS, FORWARD_SPACE_SHADING);
+SamplerState s_LatentSampler : REGISTER_SAMPLER(FORWARD_BINDING_LATENTS_SAMPLER, FORWARD_SPACE_SHADING);
 
-#if NETWORK_VERSION != NTC_NETWORK_UNKNOWN
+#if USE_NTC_MATERIAL
 
 DECLARE_CBUFFER(NtcTextureSetConstants, g_NtcMaterial, FORWARD_BINDING_NTC_MATERIAL_CONSTANTS, FORWARD_SPACE_MATERIAL);
-ByteAddressBuffer t_InputFile    : REGISTER_SRV(FORWARD_BINDING_NTC_LATENTS_BUFFER, FORWARD_SPACE_MATERIAL);
+Texture2DArray t_Latents         : REGISTER_SRV(FORWARD_BINDING_NTC_LATENTS_TEXTURE, FORWARD_SPACE_MATERIAL);
 ByteAddressBuffer t_WeightBuffer : REGISTER_SRV(FORWARD_BINDING_NTC_WEIGHTS_BUFFER, FORWARD_SPACE_MATERIAL);
 
 void GetSamplePositionWithSTF(inout HashBasedRNG rng, float2 uv, out int2 texel, out int mipLevel)
@@ -73,22 +68,20 @@ MaterialTextureSample SampleNtcMaterial(uint2 pixelPosition, float2 uv)
     const bool linearizeColorsOnSample = false;
 
     // Decompress the texel and get all the channels.
-    float channels[NtcParams::OUTPUT_CHANNELS];
+    float channels[NTC_MLP_OUTPUT_CHANNELS];
 #ifdef USE_COOPVEC
-    #if USE_FP8
-        NtcSampleTextureSet_CoopVec_FP8<NETWORK_VERSION>(g_NtcMaterial, t_InputFile, 0,
-            t_WeightBuffer, 0, texel, mipLevel, linearizeColorsOnSample, channels);
-    #else
-        NtcSampleTextureSet_CoopVec_Int8<NETWORK_VERSION>(g_NtcMaterial, t_InputFile, 0,
-            t_WeightBuffer, 0, texel, mipLevel, linearizeColorsOnSample, channels);
-    #endif
+    bool sampleSucceeded = NtcSampleTextureSet_CoopVec_FP8(g_NtcMaterial, t_Latents, s_LatentSampler,
+        t_WeightBuffer, 0, texel, mipLevel, linearizeColorsOnSample, channels);
 #else
-    NtcSampleTextureSet<NETWORK_VERSION>(g_NtcMaterial, t_InputFile, 0,
+    bool sampleSucceeded = NtcSampleTextureSet(g_NtcMaterial, t_Latents, s_LatentSampler,
         t_WeightBuffer, 0, texel, mipLevel, linearizeColorsOnSample, channels);
 #endif
 
     // Initialize the 'textures' object with default values, just in case we miss something below.
     MaterialTextureSample textures = DefaultMaterialTextures();
+    
+    if (!sampleSucceeded)
+        return textures;
 
     // Distribute the NTC channels into the MaterialTextureSample's fields using a fixed mapping.
     // The mapping is enforced by the loader, see NtcMaterialLoader.cpp
@@ -145,7 +138,6 @@ MaterialTextureSample SampleNtcMaterial(uint2 pixelPosition, float2 uv)
 }
 #endif
 
-
 void main(
     in float4 i_position : SV_Position,
     in SceneVertex i_vtx,
@@ -156,10 +148,10 @@ void main(
 #endif
 )
 {
-#if NETWORK_VERSION == NTC_NETWORK_UNKNOWN
-    MaterialTextureSample textures = DefaultMaterialTextures();
-#else
+#if USE_NTC_MATERIAL
     MaterialTextureSample textures = SampleNtcMaterial(int2(i_position.xy), i_vtx.texCoord);
+#else
+    MaterialTextureSample textures = DefaultMaterialTextures();
 #endif
 
     // Force the MetalnessInRedChannel flag because it might not be set in the material constants

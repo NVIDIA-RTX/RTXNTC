@@ -210,20 +210,10 @@ bool DecompressTextureSetWithGraphicsAPI(
     int mipLevels,
     GraphicsResourcesForTextureSet const& graphicsResources)
 {
-    // Request the stream range for the entire mip chain.
-    ntc::StreamRange streamRange;
-    ntc::Status ntcStatus = metadata->GetStreamRangeForLatents(0, mipLevels, streamRange);
-    if (ntcStatus != ntc::Status::Ok)
-    {
-        fprintf(stderr, "Call to GetStreamRangeForLatents failed, code = %s: %s\n",
-            StatusToString(ntcStatus), ntc::GetLastErrorMessage());
-        return false;
-    }
-
     // In some cases, this function is called without a file - which means we reuse the previously uploaded data.
     if (inputFile)
     {
-        if (!gdp.SetInputData(commandList, inputFile, streamRange))
+        if (!gdp.SetLatentDataFromTextureSet(commandList, inputFile, metadata))
         {
             fprintf(stderr, "GraphicsDecompressionPass::SetInputData failed.\n");
             return false;
@@ -268,7 +258,6 @@ bool DecompressTextureSetWithGraphicsAPI(
         // Obtain the compute pass description and constant buffer data from NTC
         ntc::MakeDecompressionComputePassParameters params;
         params.textureSetMetadata = metadata;
-        params.latentStreamRange = streamRange;
         params.mipLevel = mipLevel;
         params.firstOutputDescriptorIndex = mipLevel * numTextures;
         params.weightType = weightType;

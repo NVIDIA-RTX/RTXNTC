@@ -200,11 +200,14 @@ struct MaterialImage
     std::string name;
     ntc::ChannelFormat format = ntc::ChannelFormat::UNORM8;
     ntc::BlockCompressedFormat bcFormat = ntc::BlockCompressedFormat::None;
+    float lossFunctionScale = 1.f;
     bool isSRGB = false;
     bool referenceMipsValid = false;
     bool textureSetDataValid = false;
     size_t uncompressedSize = 0;
     size_t uncompressedSizeWithMips = 0;
+    size_t bcSize = 0;
+    size_t bcSizeWithMips = 0;
     std::vector<ImageSemanticBinding> manifestSemantics;
 
     nvrhi::TextureHandle referenceTexture;
@@ -273,21 +276,71 @@ struct MaterialImage
 
     void ComputeUncompressedSize()
     {
-        uncompressedSize = width * height * channels;
+        size_t bytesPerPixel = 0;
 
         switch(format)
         {
+            case ntc::ChannelFormat::UNORM8:
+                bytesPerPixel = channels;
+                break;
+
             case ntc::ChannelFormat::UNORM16:
             case ntc::ChannelFormat::FLOAT16:
-                uncompressedSize *= 2;
+                bytesPerPixel = 2 * channels;
                 break;
+
             case ntc::ChannelFormat::UINT32:
             case ntc::ChannelFormat::FLOAT32:
-                uncompressedSize *= 4;
+                bytesPerPixel = 4 * channels;
+                break;
+        }
+        assert(bytesPerPixel != 0);
+
+        size_t bytesPerBlock = 0;
+
+        switch(bcFormat)
+        {
+            case ntc::BlockCompressedFormat::BC1:
+            case ntc::BlockCompressedFormat::BC4:
+                bytesPerBlock = 8;
+                break;
+            default:
+                bytesPerBlock = 16;
                 break;
         }
 
-        uncompressedSizeWithMips = (uncompressedSize * 4) / 3;
+        int const mipLevels = GetNumMipLevels(width, height);
+        for (int mip = 0; mip < mipLevels; ++mip)
+        {
+            int const mipWidth = std::max(1, width >> mip);
+            int const mipHeight = std::max(1, height >> mip);
+
+            size_t const uncompressedMipSize = size_t(mipWidth) * size_t(mipHeight) * channels * bytesPerPixel;
+
+            if (mip == 0)
+                uncompressedSize = uncompressedMipSize;
+            
+            uncompressedSizeWithMips += uncompressedMipSize;
+
+            if (bcFormat != ntc::BlockCompressedFormat::None)
+            {
+                int const mipWidthBlocks = (mipWidth + 3) / 4;
+                int const mipHeightBlocks = (mipHeight + 3) / 4;
+
+                size_t const bcMipSize = size_t(mipWidthBlocks) * size_t(mipHeightBlocks) * bytesPerBlock;
+                
+                if (mip == 0)
+                    bcSize = bcMipSize;
+
+                bcSizeWithMips += bcMipSize;
+            }
+        }
+
+        if (bcFormat == ntc::BlockCompressedFormat::None)
+        {
+            bcSize = uncompressedSize;
+            bcSizeWithMips = uncompressedSizeWithMips;
+        }
     }
 };
 
@@ -366,7 +419,7 @@ private:
     float m_experimentalKnob = 0.f;
     bool m_developerUI = false;
 
-    bool m_useFp8Decompression = false;
+    bool m_useInt8Decompression = false;
     bool m_useGapiDecompression = false;
     bool m_useGapiDecompressionRect = false;
     ntc::Rect m_gapiDecompressionRect;
@@ -428,10 +481,7 @@ public:
         contextParams.vkInstance = GetDevice()->getNativeObject(nvrhi::ObjectTypes::VK_Instance);
         contextParams.vkPhysicalDevice = GetDevice()->getNativeObject(nvrhi::ObjectTypes::VK_PhysicalDevice);
         contextParams.vkDevice = GetDevice()->getNativeObject(nvrhi::ObjectTypes::VK_Device);
-        contextParams.graphicsDeviceSupportsDP4a = IsDP4aSupported(GetDevice());
-        contextParams.graphicsDeviceSupportsFloat16 = IsFloat16Supported(GetDevice());
-        contextParams.enableCooperativeVectorFP8 = osSupportsCoopVec;
-        contextParams.enableCooperativeVectorInt8 = osSupportsCoopVec;
+        contextParams.enableCooperativeVector = osSupportsCoopVec;
 
         ntc::Status ntcStatus = ntc::CreateContext(m_ntcContext.ptr(), contextParams);
         if (ntcStatus != ntc::Status::Ok && ntcStatus != ntc::Status::CudaUnavailable)
@@ -906,6 +956,10 @@ public:
                 image.manifestSemantics = entry.semantics;
                 image.bcFormat = entry.bcFormat;
                 image.ComputeUncompressedSize();
+                
+                // Explorer doesn't support per-channel loss scaling, so just use the first one if there are multiple
+                if (!entry.lossFunctionScales.empty())
+                    image.lossFunctionScale = entry.lossFunctionScales[0];
 
                 m_images.push_back(std::move(image));
 
@@ -1271,11 +1325,6 @@ public:
 
         ntc::TextureSetDesc const& textureSetDesc = metadata->GetDesc();
 
-        ntc::StreamRange streamRange;
-        ntcStatus = metadata->GetStreamRangeForLatents(0, textureSetDesc.mips, streamRange);
-        if (ntcStatus != ntc::Status::Ok)
-            return ntcStatus;
-
         ntc::InferenceWeightType weightType = metadata->GetBestSupportedWeightType();
         if (weightType == ntc::InferenceWeightType::Unknown)
             return ntc::Status::Unsupported;
@@ -1283,7 +1332,7 @@ public:
         // Open the command list, upload the latents and weights
         m_commandList->open();
         m_commandList->beginMarker("Upload NTC Data");
-        if (!m_decompressionPass.SetInputData(m_commandList, inputStream, streamRange))
+        if (!m_decompressionPass.SetLatentDataFromTextureSet(m_commandList, inputStream, metadata))
         {
             m_commandList->close();
             return ntc::Status::InternalError;
@@ -1306,7 +1355,6 @@ public:
             ntc::ComputePassDesc computePass{};
             ntc::MakeDecompressionComputePassParameters params;
             params.textureSetMetadata = metadata;
-            params.latentStreamRange = streamRange;
             params.mipLevel = mipLevel;
             params.firstOutputDescriptorIndex = mipLevel * int(m_images.size());
             params.pSrcRect = m_useGapiDecompressionRect ? &m_gapiDecompressionRect : nullptr;
@@ -1362,7 +1410,7 @@ public:
         return ntc::Status::Ok;
     }
 
-    bool DecompressIntoTextures(bool recordResults, bool useRightTextures, bool enableFP8, time_point<steady_clock> beginTime)
+    bool DecompressIntoTextures(bool recordResults, bool useRightTextures, bool enableInt8, time_point<steady_clock> beginTime)
     {
         if (!m_cudaAvailable)
             return false;
@@ -1370,7 +1418,7 @@ public:
         m_textureSet->SetExperimentalKnob(m_experimentalKnob);
 
         ntc::DecompressionStats stats;
-        ntc::Status ntcStatus = m_textureSet->Decompress(&stats, m_useFp8Decompression && enableFP8);
+        ntc::Status ntcStatus = m_textureSet->Decompress(&stats, m_useInt8Decompression && enableInt8);
         CHECK_NTC_RESULT(Decompress);
         CHECK_CANCEL(false);
 
@@ -1757,6 +1805,15 @@ public:
         ntcStatus = m_textureSet->SetLatentShape(m_latentShape);
         CHECK_NTC_RESULT(SetLatentShape);
         
+        // Apply the per-image loss function scales to the appropriate channels
+        for (auto const& image : m_images)
+        {
+            for (int channel = image.firstChannel; channel < image.firstChannel + image.channels; ++channel)
+            {
+                m_compressionSettings.lossFunctionScales[channel] = image.lossFunctionScale;
+            }
+        }
+        
         time_point beginTime = steady_clock::now();
 
         ntcStatus = m_textureSet->BeginCompression(m_compressionSettings);
@@ -1792,6 +1849,7 @@ public:
                 {
                     m_rightImageName = textureName;
                 }
+                GetDeviceManager()->RenderNextFrameWhileUnfocused();
             }
         } while (ntcStatus == ntc::Status::Incomplete);
         CHECK_NTC_RESULT(RunCompressionSteps);
@@ -1810,6 +1868,7 @@ public:
             std::lock_guard guard(m_mutex);
             m_rightImageName = textureName;
         }
+        GetDeviceManager()->RenderNextFrameWhileUnfocused();
 
         return success;
 
@@ -1871,10 +1930,10 @@ public:
 
     void Render(nvrhi::IFramebuffer* framebuffer) override
     {
-        if (!m_flatImageView->Init(framebuffer))
+        if (!m_flatImageView->Init(framebuffer->getFramebufferInfo()))
             return;
 
-        if (!m_modelView->Init(framebuffer))
+        if (!m_modelView->Init(framebuffer->getFramebufferInfo()))
             return;
 
         if (m_loading)
@@ -2151,8 +2210,19 @@ public:
                         image.textureSetDataValid = false;
                     }
                 }
+                ImGui::SameLine(fontSize * 14.f);
+                ImGui::PushItemWidth(fontSize * 3.f);
+                ImGui::SliderFloat("##LossScale", &image.lossFunctionScale, 0.1f, 10.f, "%.2f", ImGuiSliderFlags_Logarithmic);
+                if (index == 0 && ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted("Loss function scale for textures.\n"
+                        "Higher values make the texture compress more accurately than others.");
+                    ImGui::EndTooltip();
+                }
+                ImGui::PopItemWidth();
 
-                ImGui::SameLine(fontSize * 14.4f);
+                ImGui::SameLine(fontSize * 17.4f);
                 ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(128, 128, 128, 255));
                 if (image.bcFormat != ntc::BlockCompressedFormat::None)
                 {
@@ -2262,67 +2332,23 @@ public:
                 ImGui::Separator();
                 ImGui::TextUnformatted("Encoding Parameters:");
 
-                // This functions presents a horizontal set of toggle buttons with labels specified
-                // in the "options" string, along with their associated values.
-                // The options string is expected to follow the following format:
-                //   <name>|<value>,<name>|<value>,...  (comma at the end optional)
-                // Very minimal format checking is performed, so be careful.
-                auto selectFromList = [fontSize](const char* label, const char* options, int* variable)
-                {
-                    const char* p = options;
-                    bool first = true;
-                    while (p && *p)
-                    {
-                        if (!first)
-                            ImGui::SameLine();
-                        first = false;
-
-                        const char* name1 = p;
-                        p = strchr(p, '|');
-                        assert(p);
-                        ++p;
-
-                        const char* value1 = p;
-                        p = strchr(p, ',');
-                        if (p)
-                            ++p;
-
-                        char name[32];
-                        char valueStr[32];
-                        name[0] = 0;
-                        strncat(name, name1, std::min(size_t(value1 - name1 - 1), sizeof name));
-                        valueStr[0] = 0;
-                        strncat(valueStr, value1, std::min(size_t(p - value1 - 1), sizeof valueStr));
-
-                        int value = atoi(valueStr);
-
-                        char buttonLabel[64];
-                        snprintf(buttonLabel, sizeof(buttonLabel), "%s##%s", name, label);
-                        bool active = *variable == value;
-                        ImGui::ToggleButton(buttonLabel, &active, { fontSize * 2.f, 0.f });
-                        if (active)
-                            *variable = value;
-                    }
-
-                    ImGui::SameLine(fontSize * 10.5f);
-                    ImGui::TextUnformatted(label);
-                };
-
                 float currentBpp = ntc::GetLatentShapeBitsPerPixel(m_latentShape);
-                if (ImGui::SliderFloat("Bits per Pixel", &currentBpp, 0.5f, 20.f, "%.3f", ImGuiSliderFlags_Logarithmic))
+                if (ImGui::SliderFloat("Bits per Pixel", &currentBpp, 1.0f, 20.f, "%.3f", ImGuiSliderFlags_Logarithmic))
                 {
-                    ntc::PickLatentShape(currentBpp, NTC_NETWORK_UNKNOWN, currentBpp, m_latentShape);
+                    ntc::PickLatentShape(currentBpp, currentBpp, m_latentShape);
                 }
                 ImGui::TooltipMarker("The bitrate to aim for in a single MIP level.\n"
                     "When compressing the entire MIP chain, overall bitrate will be lower.");
 
                 if (m_developerUI)
                 {
-                    selectFromList("Grid Size Scale", "1/8|8,1/6|6,1/4|4,1/2|2", &m_latentShape.gridSizeScale);
-                    selectFromList("High-Res Features", "4|4,8|8,12|12,16|16", &m_latentShape.highResFeatures);
-                    selectFromList("Low-Res Features", "4|4,8|8,12|12,16|16", &m_latentShape.lowResFeatures);
-                    selectFromList("High Res Quant Bits", "1|1,2|2,4|4,8|8", &m_latentShape.highResQuantBits);
-                    selectFromList("Low Res Quant Bits", "1|1,2|2,4|4,8|8", &m_latentShape.lowResQuantBits);
+                    ImGui::SliderInt("Grid Size Scale", &m_latentShape.gridSizeScale, 1, 6);
+                    
+                    if (ImGui::SliderInt("Number of Features", &m_latentShape.numFeatures, NTC_FEATURES_PER_LAYER, NTC_MLP_FEATURES))
+                    {
+                        // Round to a multiple of NTC_FEATURES_PER_LAYER
+                        m_latentShape.numFeatures = ((m_latentShape.numFeatures + 1) / NTC_FEATURES_PER_LAYER) * NTC_FEATURES_PER_LAYER;
+                    }
                 }
                 
                 bool compressMipChain = m_textureSetDesc.mips > 1;
@@ -2338,12 +2364,16 @@ public:
                 if (ntc::EstimateCompressedTextureSetSize(m_textureSetDesc, m_latentShape, estimatedFileSize) == ntc::Status::Ok)
                 {
                     size_t uncompressedTextureSize = 0;
+                    bool useBcFormats = false;
                     for (const auto& image : m_images)
                     {
                         if (compressMipChain)
-                            uncompressedTextureSize += image.uncompressedSizeWithMips;
+                            uncompressedTextureSize += image.bcSizeWithMips;
                         else
-                            uncompressedTextureSize += image.uncompressedSize;
+                            uncompressedTextureSize += image.bcSize;
+
+                        if (image.bcFormat != ntc::BlockCompressedFormat::None)
+                            useBcFormats = true;
                     }
                     
                     const double fileSizeMegabytes = double(estimatedFileSize) / 1'048'576.0;
@@ -2351,8 +2381,15 @@ public:
                     const double compressionRatio = double(uncompressedTextureSize) / double(estimatedFileSize);
                     ImGui::PushFont(m_LargerFont->GetScaledFont());
                     ImGui::Text("File Size: %.2f MB", fileSizeMegabytes);
-                    ImGui::Text("%.2f bpp, ratio %.2fx", compressedBitsPerPixel, compressionRatio);
+                    ImGui::Text("Effective bitrate: %.2f bpp", compressedBitsPerPixel);
+                    if (useBcFormats)
+                        ImGui::Text("Compression ratio: %.2fx over BCn", compressionRatio);
+                    else
+                        ImGui::Text("Compression ratio: %.2fx over raw", compressionRatio);
                     ImGui::PopFont();
+                        
+                    ImGui::TooltipMarker("The ratio is calculated using the BC formats specified in the manifest.\n"
+                        "If images were loaded without manifest or no BC formats were specified, the original bitrates are used instead.");
                 }
                 
                 ImGui::Separator();
@@ -2402,7 +2439,7 @@ public:
                 
                 if (m_developerUI)
                 {
-                    ImGui::Checkbox("Enable FP8 restore", &m_useFp8Decompression);
+                    ImGui::Checkbox("Enable Int8 restore", &m_useInt8Decompression);
                     ImGui::Checkbox("Restore with GAPI Decompression", &m_useGapiDecompression);
                     ImGui::Checkbox("Decompress sub-rect (for testing)", &m_useGapiDecompressionRect);
                     if (m_useGapiDecompressionRect)
@@ -2593,10 +2630,7 @@ public:
             setupRow("Random seed");                ImGui::Text("%d", m_selectedCompressionResult.compressionSettings.randomSeed);
             setupRow("Stable training");            ImGui::Text("%s", m_selectedCompressionResult.compressionSettings.stableTraining ? "YES" : "NO");
             setupRow("Grid size scale");            ImGui::Text("%d", m_selectedCompressionResult.latentShape.gridSizeScale);
-            setupRow("High-res features");          ImGui::Text("%d", m_selectedCompressionResult.latentShape.highResFeatures);
-            setupRow("High-res quantization bits"); ImGui::Text("%d", m_selectedCompressionResult.latentShape.highResQuantBits);
-            setupRow("Low-res features");           ImGui::Text("%d", m_selectedCompressionResult.latentShape.lowResFeatures);
-            setupRow("Low-res quantization bits");  ImGui::Text("%d", m_selectedCompressionResult.latentShape.lowResQuantBits);
+            setupRow("Number of features");         ImGui::Text("%d", m_selectedCompressionResult.latentShape.numFeatures);
             setupRow("Compression steps");          ImGui::Text("%d", m_selectedCompressionResult.compressionSettings.trainingSteps);
             setupRow("kPixels per batch");          ImGui::Text("%d", m_selectedCompressionResult.compressionSettings.kPixelsPerBatch);
             setupRow("Network learning rate");      ImGui::Text("%.4f", m_selectedCompressionResult.compressionSettings.networkLearningRate);

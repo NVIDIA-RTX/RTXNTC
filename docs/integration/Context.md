@@ -28,11 +28,8 @@ else if (using_DX12)
     contextParams.d3d12Device = d3d12Device;
 }
 
-// Optionally, init these fields for GPU features. The default values should work on most modern GPUs.
-contextParams.graphicsDeviceSupportsDP4a = ...;
-contextParams.graphicsDeviceSupportsFloat16 = ...;
-contextParams.enableCooperativeVectorInt8 = ...;
-contextParams.enableCooperativeVectorFP8 = ...;
+// Optionally, use the 'enableCooperativeVector' to disable CoopVec support if needed.
+contextParams.enableCooperativeVector = ...;
 
 ntc::Status ntcStatus = ntc::CreateContext(&context, contextParams);
 if (ntcStatus != ntc::Status::Ok && ntcStatus != ntc::Status::CudaUnavailable)

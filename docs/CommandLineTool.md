@@ -63,7 +63,7 @@ Compressing all textures from a directory to a specific bit rate:
 ntc-cli --loadImages <input-dir> \
         --generateMips \
         --compress \
-        --bitsPerPixel <value> \ # can be between 0.5 and 20
+        --bitsPerPixel <value> \ # can be between 1.0 and 20
         --decompress
         --saveCompressed <file.ntc>
 

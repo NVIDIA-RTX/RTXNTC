@@ -67,8 +67,6 @@ struct
     bool inferenceOnSample = true;
     bool inferenceOnFeedback = true;
     bool enableCoopVec = true;
-    bool enableCoopVecInt8 = true;
-    bool enableCoopVecFP8 = true;
     bool enableDLSS = true;
     int adapterIndex = -1;
 } g_options;
@@ -89,9 +87,7 @@ bool ProcessCommandLine(int argc, const char** argv)
         OPT_BOOLEAN(0, "inferenceOnLoad", &g_options.inferenceOnLoad, "Enable inference on load (default on, use --no-inferenceOnLoad)"),
         OPT_BOOLEAN(0, "inferenceOnSample", &g_options.inferenceOnSample, "Enable inference on sample (default on, use --no-inferenceOnSample)"),
         OPT_BOOLEAN(0, "inferenceOnFeedback", &g_options.inferenceOnFeedback, "Enable inference on feedback (default on, use --no-inferenceOnFeedback)"),
-        OPT_BOOLEAN(0, "coopVec", &g_options.enableCoopVec, "Enable all CoopVec extensions (default on, use --no-coopVec)"),
-        OPT_BOOLEAN(0, "coopVecFP8", &g_options.enableCoopVecFP8, "Enable CoopVec extensions for FP8 math (default on, use --no-coopVecFP8)"),
-        OPT_BOOLEAN(0, "coopVecInt8", &g_options.enableCoopVecInt8, "Enable CoopVec extensions for Int8 math (default on, use --no-coopVecInt8)"),
+        OPT_BOOLEAN(0, "coopVec", &g_options.enableCoopVec, "Enable CoopVec extensions (default on, use --no-coopVec)"),
         OPT_BOOLEAN(0, "dlss", &g_options.enableDLSS, "Enable DLSS (default on, use --no-dlss)"),
         OPT_INTEGER(0, "adapter", &g_options.adapterIndex, "Index of the graphics adapter to use (use ntc-cli.exe --dx12|vk --listAdapters to find out)"),
         OPT_STRING(0, "materialDir", &g_options.materialDir, "Subdirectory near the scene file where NTC materials are located"),
@@ -153,12 +149,6 @@ bool ProcessCommandLine(int argc, const char** argv)
     g_options.useDX12 = false;
     g_options.useVulkan = true;
 #endif
-
-    if (!g_options.enableCoopVec)
-    {
-        g_options.enableCoopVecInt8 = false;
-        g_options.enableCoopVecFP8 = false;
-    }
 
     if (g_options.scenePath.empty())
     {
@@ -353,8 +343,6 @@ public:
         {
         case ntc::InferenceWeightType::GenericInt8:
             return "DP4a";
-        case ntc::InferenceWeightType::CoopVecInt8:
-            return "INT8 (CoopVec)";
         case ntc::InferenceWeightType::CoopVecFP8:
             return "FP8 (CoopVec)";
         default:
@@ -539,8 +527,7 @@ public:
     
     bool Init()
     {
-        if (!m_materialLoader->Init(g_options.enableCoopVecInt8, g_options.enableCoopVecFP8,
-            m_commonPasses->m_BlackTexture))
+        if (!m_materialLoader->Init(g_options.enableCoopVec, m_commonPasses->m_BlackTexture))
             return false;
 
         if (!ImGui_Renderer::Init(m_shaderFactory))

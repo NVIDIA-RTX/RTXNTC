@@ -47,9 +47,7 @@ struct NtcMaterial : public donut::engine::Material
 {
     nvrhi::BufferHandle ntcConstantBuffer;
     nvrhi::BufferHandle ntcWeightsBuffer;
-    nvrhi::BufferHandle ntcLatentsBuffer;
-    ntc::StreamRange latentStreamRange;
-    int networkVersion = 0;
+    nvrhi::TextureHandle ntcLatentsTexture;
     int weightType = 0;
     size_t transcodedMemorySize = 0;
     size_t ntcMemorySize = 0;

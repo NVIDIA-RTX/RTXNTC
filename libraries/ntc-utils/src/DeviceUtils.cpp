@@ -28,59 +28,6 @@ extern "C"
 #if NTC_WITH_DX12
 static bool g_dx12DeveloperModeEnabled = false;
 #endif
-#if NTC_WITH_VULKAN
-static bool g_vulkanDP4aSupported = false;
-static bool g_vulkanFloat16Supported = false;
-#endif
-
-bool IsDP4aSupported(nvrhi::IDevice* device)
-{
-#if NTC_WITH_VULKAN
-    if (device->getGraphicsAPI() == nvrhi::GraphicsAPI::VULKAN)
-        return g_vulkanDP4aSupported;
-#endif
-
-#if NTC_WITH_DX12
-    if (device->getGraphicsAPI() == nvrhi::GraphicsAPI::D3D12)
-    {
-        D3D12_FEATURE_DATA_SHADER_MODEL featureData{};
-        featureData.HighestShaderModel = D3D_SHADER_MODEL_6_7;
-        ID3D12Device* d3d12Device = device->getNativeObject(nvrhi::ObjectTypes::D3D12_Device);
-        HRESULT hr = d3d12Device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &featureData, sizeof(featureData));
-        if (SUCCEEDED(hr))
-        {
-            // dot4add is a required feature of SM6.4
-            // https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/hlsl-shader-model-6-4-features-for-direct3d-12
-            return featureData.HighestShaderModel >= D3D_SHADER_MODEL_6_4;
-        }    
-    }
-#endif
-
-    return false;
-}
-
-bool IsFloat16Supported(nvrhi::IDevice* device)
-{
-#if NTC_WITH_VULKAN
-    if (device->getGraphicsAPI() == nvrhi::GraphicsAPI::VULKAN)
-        return g_vulkanFloat16Supported;
-#endif
-
-#if NTC_WITH_DX12
-    if (device->getGraphicsAPI() == nvrhi::GraphicsAPI::D3D12)
-    {
-        D3D12_FEATURE_DATA_D3D12_OPTIONS4 featureData{};
-        ID3D12Device* d3d12Device = device->getNativeObject(nvrhi::ObjectTypes::D3D12_Device);
-        HRESULT hr = d3d12Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS4, &featureData, sizeof(featureData));
-        if (SUCCEEDED(hr))
-        {
-            return featureData.Native16BitShaderOpsSupported;
-        }    
-    }
-#endif
-
-    return false;
-}
 
 bool IsDX12DeveloperModeEnabled()
 {
@@ -111,32 +58,8 @@ void SetNtcGraphicsDeviceParameters(
         deviceParams.optionalVulkanDeviceExtensions.push_back(VK_NV_COOPERATIVE_VECTOR_EXTENSION_NAME);
         deviceParams.optionalVulkanDeviceExtensions.push_back(VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME);
         deviceParams.optionalVulkanDeviceExtensions.push_back(VK_EXT_SHADER_REPLICATED_COMPOSITES_EXTENSION_NAME);
+        deviceParams.optionalVulkanDeviceExtensions.push_back(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
 
-        // vkCmdCopyImage: Dest image pRegion[0] x-dimension offset [0] + extent [4] exceeds subResource width [2]
-        // vkCmdCopyImage: Dest image pRegion[0] y-dimension offset [0] + extent [4] exceeds subResource height [2]
-        // These errors happen during copies from block textures to BCn textures at the last 2 mips, no way around it.
-        deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x38b5face);
-        deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x4bb17a0e);
-
-        // The following warnings are related to the Cooperative Vector extension that the validation layers don't know.
-        // SPIR-V module not valid: Invalid capability operand: 5394
-        deviceParams.ignoredVulkanValidationMessageLocations.push_back(0xa5625282);
-        // vkCreateShaderModule(): A SPIR-V Capability (Unhandled OpCapability) was declared that is not supported by Vulkan.
-        deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x2c00a3d6);
-        deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x605314fa);
-        // A SPIR-V Extension (SPV_NV_cooperative_vector) was declared that is not supported by Vulkan.
-        deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x938b32);
-        // Device Extension VK_NV_cooperative_vector is not supported by this layer
-        deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x79de34d4);
-        // vkCreateDevice: pCreateInfo->pNext chain includes a structure with unknown VkStructureType (1000491000)
-        // That's VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_VECTOR_FEATURES_NV
-        deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x901f59ec);
-
-        // fragment shader writes to output location 1 with no matching attachment
-        // This happens in the forward shading pass for transmissive materials. Difficult to work around.
-        deviceParams.ignoredVulkanValidationMessageLocations.push_back(0x609a13b);
-        
-                
         // Add feature structures querying for cooperative vector support and DP4a support
         static VkPhysicalDeviceCooperativeVectorFeaturesNV cooperativeVectorFeatures{};
         cooperativeVectorFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_VECTOR_FEATURES_NV;
@@ -173,9 +96,8 @@ void SetNtcGraphicsDeviceParameters(
 
                 if (pCurrent->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
                 {
-                    g_vulkanFloat16Supported = vulkan12Features.shaderFloat16;
                     reinterpret_cast<VkPhysicalDeviceVulkan12Features*>(pCurrent)->shaderFloat16 = 
-                        g_vulkanFloat16Supported;
+                        vulkan12Features.shaderFloat16;
                     reinterpret_cast<VkPhysicalDeviceVulkan12Features*>(pCurrent)->vulkanMemoryModel = true;
                     reinterpret_cast<VkPhysicalDeviceVulkan12Features*>(pCurrent)->vulkanMemoryModelDeviceScope = true;
                     reinterpret_cast<VkPhysicalDeviceVulkan12Features*>(pCurrent)->storageBuffer8BitAccess = 
@@ -184,9 +106,8 @@ void SetNtcGraphicsDeviceParameters(
 
                 if (pCurrent->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES)
                 {
-                    g_vulkanDP4aSupported = vulkan13Features.shaderIntegerDotProduct;
                     reinterpret_cast<VkPhysicalDeviceVulkan13Features*>(pCurrent)->shaderIntegerDotProduct =
-                        g_vulkanDP4aSupported;
+                        vulkan13Features.shaderIntegerDotProduct;
                     reinterpret_cast<VkPhysicalDeviceVulkan13Features*>(pCurrent)->shaderDemoteToHelperInvocation =
                         vulkan13Features.shaderDemoteToHelperInvocation;
                 }
