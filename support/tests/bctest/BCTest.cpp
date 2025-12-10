@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -27,15 +27,11 @@
 #include <ntc-utils/GraphicsImageDifferencePass.h>
 #include <ntc-utils/GraphicsBlockCompressionPass.h>
 #include <ntc-utils/Manifest.h>
+#include <ntc-utils/Misc.h>
 #include <ntc-utils/DDSHeader.h>
 
 #if NTC_WITH_NVTT
 #include <nvtt/nvtt.h>
-#endif
-
-#ifdef _MSC_VER // MSVC doesn't have strcasecmp
-#define strncasecmp _strnicmp
-#define strcasecmp _stricmp
 #endif
 
 namespace fs = std::filesystem;
@@ -50,11 +46,11 @@ struct
     bool useVulkan = false;
     bool useDX12 = false;
     bool debug = false;
-    bool modeStats = false;
     bool ntc = true;
 #if NTC_WITH_NVTT
     bool nvtt = true;
 #endif
+    bool acceleratedMode = false;
     int adapterIndex = -1;
     int threads = 0;
 } g_options;
@@ -78,7 +74,7 @@ bool ProcessCommandLine(int argc, const char** argv)
 #if NTC_WITH_NVTT
         OPT_BOOLEAN(0, "nvtt", &g_options.nvtt, "Enable BCn compression through NVTT (default on, use --no-nvtt)"),
 #endif
-        OPT_BOOLEAN(0, "modeStats", &g_options.modeStats, "Enable collection and reporting of BC7 mode statistics"),
+        OPT_BOOLEAN(0, "accelerated", &g_options.acceleratedMode, "Test NTC accelerated mode for BC7 compression"),
         OPT_BOOLEAN(0, "debug", &g_options.debug, "Enable debug features such as Vulkan validation layer or D3D12 debug runtime"),
         OPT_INTEGER(0, "adapter", &g_options.adapterIndex, "Index of the graphics adapter to use"),
         OPT_INTEGER(0, "threads", &g_options.threads, "Number of threads to use for preloading images"),
@@ -127,6 +123,12 @@ bool ProcessCommandLine(int argc, const char** argv)
     if (!parsedFormat.has_value() || parsedFormat.value() == ntc::BlockCompressedFormat::None)
     {
         fprintf(stderr, "Invalid --format value '%s'.\n", g_options.format);
+        return false;
+    }
+
+    if (g_options.acceleratedMode && (parsedFormat != ntc::BlockCompressedFormat::BC7 || !g_options.ntc))
+    {
+        fprintf(stderr, "--accelerated can only be used with BC7 format when NTC is used.\n");
         return false;
     }
 
@@ -280,6 +282,7 @@ struct ImageData
     nvrhi::TextureHandle originalTexture;
     nvrhi::TextureHandle blockTexture;
     nvrhi::TextureHandle compressedTexture;
+    nvrhi::BufferHandle modeBuffer;
     nvrhi::StagingTextureHandle stagingTexture;
     
     ImageData()
@@ -475,7 +478,6 @@ bool CompressWithNtc(
     nvrhi::IDevice* device,
     nvrhi::ICommandList* commandList,
     nvrhi::ITimerQuery* timerQuery,
-    nvrhi::IBuffer* accelerationBuffer,
     float& outPsnr,
     float& outRmse,
     float& outGPixelsPerSecond)
@@ -487,7 +489,11 @@ bool CompressWithNtc(
     compressionParams.srcRect.height = imageData.height;
     compressionParams.dstFormat = formatDef.ntcFormat;
     compressionParams.alphaThreshold = alphaThreshold;
-    compressionParams.writeAccelerationData = accelerationBuffer != nullptr;
+    compressionParams.modeBufferSource = imageData.modeBuffer != nullptr ? 
+        ntc::BlockCompressionModeBufferSource::Custom : 
+        ntc::BlockCompressionModeBufferSource::None;
+    compressionParams.modeBufferInfo.custom.widthInBlocks = imageData.widthInBlocks;
+    compressionParams.modeBufferInfo.custom.heightInBlocks = imageData.heightInBlocks;
     ntc::ComputePassDesc blockCompressionComputePass;
     ntc::Status ntcStatus = context->MakeBlockCompressionComputePass(compressionParams, &blockCompressionComputePass);
     CHECK_NTC_RESULT(MakeBlockCompressionComputePass)
@@ -507,7 +513,8 @@ bool CompressWithNtc(
     commandList->beginTimerQuery(timerQuery);
     if (!blockCompressionPass.ExecuteComputePass(commandList, blockCompressionComputePass,
         imageData.originalTexture, nvrhi::Format::UNKNOWN, 0,
-        imageData.blockTexture, 0, accelerationBuffer))
+        imageData.modeBuffer,
+        imageData.blockTexture, 0))
     {
         commandList->endTimerQuery(timerQuery);
         commandList->close();
@@ -546,7 +553,7 @@ bool CompressWithNtc(
     // Also, they are calculated as if the maximum value of log(color + 1) was 1.0, and it's actually 11.09 for FP16/BC6.
     // This way, we're getting "sane" dB values like 40, but they're only useful for relative comparison in the same
     // framework.
-    printf("[NTC]  %s: %.2f %sdB, %.3f Gpix/s\n", imageData.name.generic_string().c_str(),
+    printf("[%s]  %s: %.2f %sdB, %.3f Gpix/s\n", imageData.modeBuffer ? "NTCa" : "NTC ", imageData.name.generic_string().c_str(),
         outPsnr, imageData.isHDR ? "false " : "", outGPixelsPerSecond);
 
     if (g_options.outputPath)
@@ -568,32 +575,46 @@ bool CompressWithNtc(
     return true;
 }
 
-void ExtractModeStats(
-    uint8_t const* blockData,
-    int widthInBlocks,
-    int heightInBlocks,
-    int bytesPerBlock,
-    std::vector<uint32_t>& modeStats)
+bool MakeBC7ModeBuffer(
+    ImageData& imageData,
+    nvrhi::IDevice* device,
+    nvrhi::ICommandList* commandList)
 {
-    for (int blockId = 0; blockId < widthInBlocks * heightInBlocks; ++blockId)
-    {
-        uint32_t const firstWord = *reinterpret_cast<uint32_t const*>(
-            blockData + blockId * bytesPerBlock);
-        
-        // Extract the mode and partition indices from the block
-        #ifdef _MSC_VER
-        int mode = std::min(7u, _tzcnt_u32(firstWord));
-        #else
-        int mode = std::min(7, __builtin_ctz(firstWord));
-        #endif
-        int partition = firstWord >> (mode + 1);
-        static const int partitionMask[8] = { 15, 63, 63, 63, 7, 3, 0, 63 };
-        partition &= partitionMask[mode];
+    size_t rowPitch;
+    uint8_t const* blockData = (uint8_t const*)device->mapStagingTexture(imageData.stagingTexture,
+        nvrhi::TextureSlice(), nvrhi::CpuAccessMode::Read, &rowPitch);
+    if (!blockData)
+        return false;
 
-        // Increment the stat counter.
-        // Note: this buffer uses the same format as the NTC BC7 compression shader, CompressBC7.hlsl
-        ++modeStats[mode * 64 + partition];
-    }
+    size_t const modeBufferSize = ntc::GetBC7ModeBufferSize(imageData.widthInBlocks, imageData.heightInBlocks);
+    std::vector<uint16_t> modeData(modeBufferSize);
+
+    ntc::Status ntcStatus = ntc::MakeBC7ModeBuffer(imageData.widthInBlocks, imageData.heightInBlocks, blockData,
+        rowPitch * imageData.heightInBlocks, rowPitch, modeData.data(), modeData.size());
+
+    device->unmapStagingTexture(imageData.stagingTexture);
+    blockData = nullptr;
+
+    CHECK_NTC_RESULT(MakeBC7ModeBuffer);
+
+    nvrhi::BufferDesc modeBufferDesc = nvrhi::BufferDesc()
+        .setDebugName("BC7 Mode Buffer")
+        .setByteSize(modeBufferSize)
+        .setCanHaveRawViews(true)
+        .setInitialState(nvrhi::ResourceStates::ShaderResource)
+        .setKeepInitialState(true);
+
+    imageData.modeBuffer = device->createBuffer(modeBufferDesc);
+    if (!imageData.modeBuffer)
+        return false;
+    
+    commandList->open();
+    commandList->writeBuffer(imageData.modeBuffer, modeData.data(), modeBufferSize);
+    commandList->close();
+    
+    device->executeCommandList(commandList);
+
+    return true;
 }
 
 #if NTC_WITH_NVTT
@@ -605,8 +626,7 @@ bool CompressWithNvtt(
     nvrhi::IDevice* device,
     nvrhi::ICommandList* commandList,
     float& outPsnr,
-    float& outRmse,
-    std::vector<uint32_t>& modeStats)
+    float& outRmse)
 {
     float const alphaThreshold = 1.f / 255.f;
 
@@ -629,12 +649,6 @@ bool CompressWithNvtt(
     {
         fprintf(stderr, "Call to nvtt_encode failed.\n");
         return false;
-    }
-
-    if (formatDef.ntcFormat == ntc::BlockCompressedFormat::BC7 && g_options.modeStats)
-    {
-        ExtractModeStats(blockData.data(), imageData.widthInBlocks, imageData.heightInBlocks,
-            formatDef.bytesPerBlock, modeStats);
     }
 
     ntc::MakeImageDifferenceComputePassParameters differenceParams;
@@ -699,6 +713,7 @@ struct Result
     float nvttPsnr = 0;
     float nvttRmse = 0;
     float ntcGPixelsPerSecond = 0;
+    bool ntcAcceleratedMatch = false;
 };
 
 // Splits the comma separated string into a vector of its components.
@@ -842,104 +857,9 @@ private:
     int m_count = 0;
 };
 
-nvrhi::BufferHandle CreateAndClearAccelerationBuffer(
-    nvrhi::IDevice* device,
-    nvrhi::ICommandList* commandList)
+bool RunTests(std::vector<fs::path> sourceFiles, std::vector<Result>& results, ntc::BlockCompressedFormat format,
+    ntc::IContext* context, nvrhi::IDevice* device)
 {
-    nvrhi::BufferDesc accelerationBufferDesc = nvrhi::BufferDesc()
-        .setDebugName("Acceleration Buffer")
-        .setByteSize(ntc::BlockCompressionAccelerationBufferSize)
-        .setCanHaveUAVs(true)
-        .setCanHaveRawViews(true)
-        .setInitialState(nvrhi::ResourceStates::UnorderedAccess)
-        .setKeepInitialState(true);
-    nvrhi::BufferHandle accelerationBuffer = device->createBuffer(accelerationBufferDesc);
-
-    commandList->open();
-    commandList->clearBufferUInt(accelerationBuffer, 0);
-    commandList->close();
-    device->executeCommandList(commandList);
-
-    return accelerationBuffer;
-}
-
-void ReportModeStatistics(
-    uint32_t const* modeStats,
-    char const* label)
-{
-    // Parse the statistics and store them in the mode list.
-    // WARNING: This code relies on the internal representation of BC7 statistics used by NTC.
-    struct Mode
-    {
-        int modePartition;
-        uint32_t count;
-    };
-    std::vector<Mode> popularModes;
-    uint32_t totalCount = 0;
-    for (int i = 0; i < ntc::BlockCompressionAccelerationBufferSize / sizeof(uint32_t); ++i)
-    {
-        if (modeStats[i])
-        {
-            popularModes.push_back(Mode {i, modeStats[i] });
-            totalCount += modeStats[i];
-        }
-    }
-
-    // Print out the top N modes.
-    if (!popularModes.empty())
-    {
-        std::sort(popularModes.begin(), popularModes.end(), [](Mode const& a, Mode const& b)
-        {
-            return a.count > b.count;
-        });
-
-        int countToReport = std::min(int(popularModes.size()), 10);
-        printf("Top %d BC7 modes for %s:\n", countToReport, label);
-        for (size_t i = 0; i < countToReport; ++i)
-        {
-            float percentage = 100.f * float(popularModes[i].count) / float(totalCount);
-            int mode = popularModes[i].modePartition >> 6;
-            int partition = popularModes[i].modePartition & 0x3f;
-            printf("Mode %d partition %2d: %.3f%%\n", mode, partition, percentage);
-        }
-    }
-}
-
-void ReportModeStatisticsFromBuffer(
-    nvrhi::IDevice* device,
-    nvrhi::ICommandList* commandList,
-    nvrhi::IBuffer* accelerationBuffer)
-{
-    // Create a staging buffer to read the data from device
-    nvrhi::BufferDesc accelerationStagingBufferDesc = nvrhi::BufferDesc()
-        .setDebugName("Acceleration Staging Buffer")
-        .setByteSize(ntc::BlockCompressionAccelerationBufferSize)
-        .setInitialState(nvrhi::ResourceStates::CopyDest)
-        .setCpuAccess(nvrhi::CpuAccessMode::Read)
-        .setKeepInitialState(true);
-    nvrhi::BufferHandle accelerationStagingBuffer = device->createBuffer(accelerationStagingBufferDesc);
-
-    // Copy the accumulation buffer into the staging buffer
-    commandList->open();
-    commandList->copyBuffer(accelerationStagingBuffer, 0, accelerationBuffer, 0, accelerationBuffer->getDesc().byteSize);
-    commandList->close();
-    device->executeCommandList(commandList);
-    device->waitForIdle();
-
-    // Map the staging buffer
-    uint32_t const* accelerationData = static_cast<uint32_t const*>(device->mapBuffer(
-        accelerationStagingBuffer, nvrhi::CpuAccessMode::Read));
-
-    if (accelerationData)
-    {
-        ReportModeStatistics(accelerationData, "NTC");
-        device->unmapBuffer(accelerationStagingBuffer);
-    }
-}
-
-bool RunTests(std::vector<fs::path> sourceFiles, std::vector<Result>& results, ntc::IContext* context, nvrhi::IDevice* device)
-{
-    ntc::BlockCompressedFormat format = ParseBlockCompressedFormat(g_options.format).value_or(ntc::BlockCompressedFormat::None);
     BcFormatDefinition const* pFormatDef = GetFormatDef(format);
 
     // Pre-initialize shared graphics passes
@@ -954,8 +874,6 @@ bool RunTests(std::vector<fs::path> sourceFiles, std::vector<Result>& results, n
 
     nvrhi::CommandListHandle commandList = device->createCommandList();
     nvrhi::TimerQueryHandle timerQuery = device->createTimerQuery();
-    nvrhi::BufferHandle accelerationBuffer = CreateAndClearAccelerationBuffer(device, commandList);
-    std::vector<uint32_t> nvttModeStats(ntc::BlockCompressionAccelerationBufferSize / sizeof(uint32_t));
 
     // The runner uses multiple threads to load source images because decoding PNG or JPG takes a long time.
     // The source image paths are placed into sourceFileQueue, and the threads pull tasks from that queue.
@@ -1043,15 +961,27 @@ bool RunTests(std::vector<fs::path> sourceFiles, std::vector<Result>& results, n
         if (g_options.ntc)
         {
             CompressWithNtc(*imageData, *pFormatDef, context, blockCompressionPass, imageDifferencePass,
-                device, commandList, timerQuery, accelerationBuffer, result.ntcPsnr, result.ntcRmse,
+                device, commandList, timerQuery, result.ntcPsnr, result.ntcRmse,
                 result.ntcGPixelsPerSecond);
+
+            if (format == ntc::BlockCompressedFormat::BC7 && g_options.acceleratedMode)
+            {
+                MakeBC7ModeBuffer(*imageData, device, commandList);
+                
+                float acceleratedPsnr = 0.f;
+                CompressWithNtc(*imageData, *pFormatDef, context, blockCompressionPass, imageDifferencePass,
+                    device, commandList, timerQuery, acceleratedPsnr, result.ntcRmse,
+                    result.ntcGPixelsPerSecond);
+
+                result.ntcAcceleratedMatch = acceleratedPsnr == result.ntcPsnr;
+            }
         }
 
 #if NTC_WITH_NVTT
         if (g_options.nvtt)
         {
             CompressWithNvtt(*imageData, *pFormatDef, context, imageDifferencePass,
-                device, commandList, result.nvttPsnr, result.nvttRmse, nvttModeStats);
+                device, commandList, result.nvttPsnr, result.nvttRmse);
         }
 #endif
 
@@ -1061,17 +991,6 @@ bool RunTests(std::vector<fs::path> sourceFiles, std::vector<Result>& results, n
     // Wait until all threads have finished
     for (auto& thread : threads)
         thread->join();
-
-    if (g_options.modeStats && format == ntc::BlockCompressedFormat::BC7)
-    {
-        if (g_options.ntc)
-            ReportModeStatisticsFromBuffer(device, commandList, accelerationBuffer);
-
-#if NTC_WITH_NVTT
-        if (g_options.nvtt)
-            ReportModeStatistics(nvttModeStats.data(), "NVTT");
-#endif
-    }
 
     return !g_Terminate;
 }
@@ -1089,7 +1008,7 @@ static float TruncatedMean(std::vector<float>& items, float discardLow, float di
     return sum / float(last - first);
 }
 
-bool ProcessResults(std::vector<Result> const& baselineResults, std::vector<Result>& results)
+bool ProcessResults( ntc::BlockCompressedFormat format, std::vector<Result> const& baselineResults, std::vector<Result>& results)
 {
     std::sort(results.begin(), results.end(), [](Result const& a, Result const& b)
     {
@@ -1101,6 +1020,7 @@ bool ProcessResults(std::vector<Result> const& baselineResults, std::vector<Resu
     Statistic ntcNvttDiff;
     std::vector<float> currentNtcGpixPerSecond;
     std::vector<float> baselineNtcGpixPerSecond;
+    int matchCount = 0;
 
     // Go over all the new results and:
     //  a) Collate them to baseline results;
@@ -1138,6 +1058,14 @@ bool ProcessResults(std::vector<Result> const& baselineResults, std::vector<Resu
 #endif
 
         currentNtcGpixPerSecond.push_back(result.ntcGPixelsPerSecond);
+
+        if (result.ntcAcceleratedMatch)
+            ++matchCount;
+        else
+        {
+            if (g_options.acceleratedMode)
+                printf("NTC accelerated mode mismatch: %s\n", result.name.generic_string().c_str());
+        }
     }
 
     // Use truncated mean to calculate the average perf.
@@ -1150,6 +1078,11 @@ bool ProcessResults(std::vector<Result> const& baselineResults, std::vector<Resu
 
     if (!currentNtcGpixPerSecond.empty())
         printf("Average NTC encoding perf: %.3f Gpix/s\n", meanNtcGpixPerSecond);
+    
+    if (g_options.acceleratedMode)
+    {
+        printf("NTC accelerated mode match: %d / %d\n", matchCount, int(results.size()));
+    }
 
     // Print out the quality statistics
     if (!ntcBaselineDiff.Empty())
@@ -1231,12 +1164,13 @@ int main(int argc, const char** argv)
 
     signal(SIGINT, SigintHandler);
 
+    ntc::BlockCompressedFormat format = ParseBlockCompressedFormat(g_options.format).value_or(ntc::BlockCompressedFormat::None);
     std::vector<fs::path> sourceFiles = EnumerateSourceFiles();
     std::vector<Result> results;
-    if (!RunTests(sourceFiles, results, context, deviceManager->GetDevice()))
+    if (!RunTests(sourceFiles, results, format, context, deviceManager->GetDevice()))
         return 1;
 
-    if (!ProcessResults(baselineResults, results))
+    if (!ProcessResults(format, baselineResults, results))
         return 1;
 
     return 0;

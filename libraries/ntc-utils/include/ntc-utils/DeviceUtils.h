@@ -12,21 +12,35 @@
 
 #pragma once
 
+#include <memory>
 #include <nvrhi/nvrhi.h>
+#if NTC_WITH_DX12
+#include <dstorage.h>
+#endif
 
 namespace donut::app
 {
     struct DeviceCreationParameters;
 }
 
+struct GDeflateFeatures
+{
+#if NTC_WITH_DX12
+    nvrhi::RefCountPtr<IDStorageQueue2> dstorageQueue;
+    HANDLE dstorageEvent = NULL;
+#endif
+    bool gpuDecompressionSupported = false;
+
+    ~GDeflateFeatures();
+};
+
 void SetNtcGraphicsDeviceParameters(
     donut::app::DeviceCreationParameters& deviceParams,
     nvrhi::GraphicsAPI graphicsApi,
     bool enableSharedMemory,
+    bool enableDX12ExperimentalFeatures,
     char const* windowTitle);
 
-bool IsDP4aSupported(nvrhi::IDevice* device);
-
-bool IsFloat16Supported(nvrhi::IDevice* device);
-
 bool IsDX12DeveloperModeEnabled();
+
+std::unique_ptr<GDeflateFeatures> InitGDeflate(nvrhi::IDevice* device, bool debugMode);

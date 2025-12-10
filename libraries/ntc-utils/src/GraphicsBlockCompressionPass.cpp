@@ -29,11 +29,14 @@ bool GraphicsBlockCompressionPass::Init()
         .addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(NTC_BINDING_BC_CONSTANT_BUFFER))
         .addItem(nvrhi::BindingLayoutItem::Texture_SRV(NTC_BINDING_BC_INPUT_TEXTURE))
         .addItem(nvrhi::BindingLayoutItem::Texture_UAV(NTC_BINDING_BC_OUTPUT_TEXTURE));
-    if (m_useAccelerationBuffer)
-        bindingLayoutDesc.addItem(nvrhi::BindingLayoutItem::RawBuffer_UAV(NTC_BINDING_BC_ACCELERATION_BUFFER));
 
     m_bindingLayout = m_device->createBindingLayout(bindingLayoutDesc);
     if (!m_bindingLayout)
+        return false;
+
+    bindingLayoutDesc.addItem(nvrhi::BindingLayoutItem::RawBuffer_SRV(NTC_BINDING_BC_MODE_BUFFER));
+    m_bindingLayoutWithModeBuffer = m_device->createBindingLayout(bindingLayoutDesc);
+    if (!m_bindingLayoutWithModeBuffer)
         return false;
     
     return true;
@@ -41,8 +44,11 @@ bool GraphicsBlockCompressionPass::Init()
 
 bool GraphicsBlockCompressionPass::ExecuteComputePass(nvrhi::ICommandList* commandList, ntc::ComputePassDesc& computePass,
     nvrhi::ITexture* inputTexture, nvrhi::Format inputFormat, int inputMipLevel,
-    nvrhi::ITexture* outputTexture, int outputMipLevel, nvrhi::IBuffer* accelerationBuffer)
+    nvrhi::IBuffer* modeBuffer,
+    nvrhi::ITexture* outputTexture, int outputMipLevel)
 {
+    auto bindingLayoutToUse = modeBuffer ? m_bindingLayoutWithModeBuffer : m_bindingLayout;
+
     // Create the pipeline for this shader if it doesn't exist yet
     auto& pipeline = m_pipelines[computePass.computeShader];
     if (!pipeline)
@@ -53,7 +59,7 @@ bool GraphicsBlockCompressionPass::ExecuteComputePass(nvrhi::ICommandList* comma
         nvrhi::ComputePipelineDesc pipelineDesc;
         pipelineDesc
             .setComputeShader(computeShader)
-            .addBindingLayout(m_bindingLayout);
+            .addBindingLayout(bindingLayoutToUse);
 
         pipeline = m_device->createComputePipeline(pipelineDesc);
 
@@ -85,11 +91,13 @@ bool GraphicsBlockCompressionPass::ExecuteComputePass(nvrhi::ICommandList* comma
             .setSubresources(nvrhi::TextureSubresourceSet().setBaseMipLevel(inputMipLevel)))
         .addItem(nvrhi::BindingSetItem::Texture_UAV(NTC_BINDING_BC_OUTPUT_TEXTURE, outputTexture)
             .setSubresources(nvrhi::TextureSubresourceSet().setBaseMipLevel(outputMipLevel)));
-    assert((accelerationBuffer != nullptr) == m_useAccelerationBuffer);
-    if (accelerationBuffer)
-        bindingSetDesc.addItem(nvrhi::BindingSetItem::RawBuffer_UAV(NTC_BINDING_BC_ACCELERATION_BUFFER, accelerationBuffer));
-
-    nvrhi::BindingSetHandle bindingSet = m_bindingCache.GetOrCreateBindingSet(bindingSetDesc, m_bindingLayout);
+    
+    if (modeBuffer)
+    {
+        bindingSetDesc.addItem(nvrhi::BindingSetItem::RawBuffer_SRV(NTC_BINDING_BC_MODE_BUFFER, modeBuffer));
+    }
+    
+    nvrhi::BindingSetHandle bindingSet = m_bindingCache.GetOrCreateBindingSet(bindingSetDesc, bindingLayoutToUse);
     if (!bindingSet)
         return false;
 

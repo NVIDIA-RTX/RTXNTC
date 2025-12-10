@@ -21,12 +21,13 @@ struct NtcMaterial;
 
 struct TextureTranscodeTask
 {
-    ntc::ITextureMetadata const* metadata = nullptr;
+    ntc::ITextureMetadata* metadata = nullptr;
     ntc::BlockCompressedFormat bcFormat = ntc::BlockCompressedFormat::None;
     nvrhi::TextureHandle color;
     nvrhi::TextureHandle blocks;
     nvrhi::TextureHandle compressed;
     nvrhi::Format nvrhiBcFormat = nvrhi::Format::UNKNOWN;
+    nvrhi::BufferHandle bc7ModeBuffer;
     int firstChannel = 0;
     int numChannels = 0;
     int mipZeroDescriptor = 0;
@@ -34,6 +35,7 @@ struct TextureTranscodeTask
     char const* name = nullptr;
     std::shared_ptr<donut::engine::LoadedTexture> NtcMaterial::* pMaterialTexture = nullptr;
     nvrhi::RefCountPtr<nvfeedback::FeedbackTexture> NtcMaterial::* pFeedbackTexture = nullptr;
+    std::vector<nvrhi::BufferRange> bc7ModeBufferMipRanges;
 
     void ReleaseTextures()
     {

@@ -58,6 +58,8 @@ struct
     bool hdr = false;
     bool useVulkan = false;
     bool useDX12 = false;
+    bool compare = false;
+    bool enableCoopVec = true;
     int adapterIndex = -1;
     int cudaDevice = 0;
 } g_options;
@@ -70,7 +72,9 @@ bool ProcessCommandLine(int argc, const char** argv)
         OPT_BOOLEAN(0, "noshared", &g_options.noshared, "Disable the use of shared textures (CUDA/Graphics interop)"),
         OPT_INTEGER(0, "adapter", &g_options.adapterIndex, "Index of the graphics adapter to use (use ntc-cli.exe --dx12|vk --listAdapters to find out)"),
         OPT_INTEGER(0, "cudaDevice", &g_options.cudaDevice, "Index of the CUDA device to use (use ntc-cli.exe --listCudaDevices to find out)"),
+        OPT_BOOLEAN(0, "coopVec", &g_options.enableCoopVec, "Enable CoopVec extensions (default on, use --no-coopVec)"),
         OPT_BOOLEAN(0, "captureMode", &g_options.captureMode, "Trace capture mode - run Graphics decompression in a loop"),
+        OPT_BOOLEAN(0, "compare", &g_options.compare, "Use Explorer to compare two images specified on the command line"),
         OPT_BOOLEAN(0, "hdr", &g_options.hdr, "Use an HDR (FP16) swap chain"),
 #if NTC_WITH_VULKAN
         OPT_BOOLEAN(0, "vk", &g_options.useVulkan, "Use Vulkan API"),
@@ -124,7 +128,7 @@ bool ProcessCommandLine(int argc, const char** argv)
 
             if (extension == ".json")
             {
-                UpdateToolInputType(g_options.inputType, ToolInputType::Manifest);
+                UpdateToolInputType(g_options.inputType, ToolInputType::ManifestFile);
             }
             else if (extension == ".ntc")
             {
@@ -162,9 +166,8 @@ bool ProcessCommandLine(int argc, const char** argv)
 #if NTC_WITH_DX12 && NTC_WITH_VULKAN
     if (!g_options.useDX12 && !g_options.useVulkan)
     {
-        // When both DX12 and Vulkan are supported, prefer DX12.
-        // This decision is mostly caused by bug 5071565 (image corruption on pixelated patterns on Vulkan).
-        g_options.useDX12 = true;
+        // When both DX12 and Vulkan are supported, prefer Vulkan.
+        g_options.useVulkan = true;
     }
 #elif NTC_WITH_DX12 && !NTC_WITH_VULKAN
     g_options.useDX12 = true;
@@ -177,8 +180,17 @@ bool ProcessCommandLine(int argc, const char** argv)
     if (g_options.inputType == ToolInputType::Mixed)
     {
         log::error("Cannot process inputs of mismatching types (image files, directories, manifests, "
-            "compressed texture sets) or multiple inputs of the same type except for images.\n");
+            "compressed texture sets) or multiple inputs of the same type except for images.");
         return false;
+    }
+
+    if (g_options.compare)
+    {
+        if (g_options.inputType != ToolInputType::Images || g_options.sourcePaths.size() != 2)
+        {
+            log::error("The --compare option requires exactly two image files as input.");
+            return false;
+        }
     }
 
     return true;
@@ -195,12 +207,13 @@ struct MaterialImage
     int height = 0;
     int channels = 0;
     int firstChannel = 0;
+    int manifestIndex = 0;
     std::shared_ptr<uint8_t> data = nullptr;
     std::shared_ptr<uint8_t> decompressedData = nullptr;
     std::string name;
     ntc::ChannelFormat format = ntc::ChannelFormat::UNORM8;
     ntc::BlockCompressedFormat bcFormat = ntc::BlockCompressedFormat::None;
-    float lossFunctionScale = 1.f;
+    std::vector<float> lossFunctionScales;
     bool isSRGB = false;
     bool referenceMipsValid = false;
     bool textureSetDataValid = false;
@@ -349,9 +362,11 @@ struct CompressionResult
     ntc::CompressionSettings compressionSettings;
     ntc::LatentShape latentShape;
     bool compressMipChain = false;
+    std::optional<bool> useGDeflate = std::nullopt;
     float bitsPerPixel = 0.f;
     float overallPSNR = 0.f;
     float perMipPSNR[NTC_MAX_MIPS]{};
+    float perChannelMSE[NTC_MAX_CHANNELS]{};
     int ordinal = 0;
     float timeSeconds = 0.f;
     float experimentalKnob = 0.f;
@@ -385,6 +400,7 @@ private:
     bool m_cancel = false;
     bool m_loadedManifestFile = false;
     bool m_sharedTexturesAvailable = false;
+    bool m_compareMode = false;
 
     std::shared_ptr<FlatImageView> m_flatImageView;
     std::shared_ptr<ModelView> m_modelView;
@@ -392,10 +408,9 @@ private:
     std::shared_ptr<app::RegisteredFont> m_LargerFont = nullptr;
     
     int m_selectedImage = 0;
+    int m_editingImage = -1;
 
     ntc::TextureSetDesc m_textureSetDesc;
-    std::optional<int> m_manifestWidth;
-    std::optional<int> m_manifestHeight;
     int m_maxOriginalWidth = 0;
     int m_maxOriginalHeight = 0;
     ntc::LatentShape m_latentShape;
@@ -418,6 +433,7 @@ private:
     std::vector<SemanticBinding> m_semanticBindings;
     float m_experimentalKnob = 0.f;
     bool m_developerUI = false;
+    bool m_enableGDeflate = false;
 
     bool m_useInt8Decompression = false;
     bool m_useGapiDecompression = false;
@@ -425,6 +441,7 @@ private:
     ntc::Rect m_gapiDecompressionRect;
     GraphicsDecompressionPass m_decompressionPass;
     nvrhi::TimerQueryHandle m_timerQuery;
+    std::optional<Manifest> m_manifest;
 
 
 public:
@@ -481,7 +498,7 @@ public:
         contextParams.vkInstance = GetDevice()->getNativeObject(nvrhi::ObjectTypes::VK_Instance);
         contextParams.vkPhysicalDevice = GetDevice()->getNativeObject(nvrhi::ObjectTypes::VK_PhysicalDevice);
         contextParams.vkDevice = GetDevice()->getNativeObject(nvrhi::ObjectTypes::VK_Device);
-        contextParams.enableCooperativeVector = osSupportsCoopVec;
+        contextParams.enableCooperativeVector = osSupportsCoopVec && g_options.enableCoopVec;
 
         ntc::Status ntcStatus = ntc::CreateContext(m_ntcContext.ptr(), contextParams);
         if (ntcStatus != ntc::Status::Ok && ntcStatus != ntc::Status::CudaUnavailable)
@@ -505,6 +522,8 @@ public:
         m_PrimaryFont = CreateFontFromMemoryCompressed(pFontData, fontSize, 16.f);
         m_LargerFont = CreateFontFromMemoryCompressed(pFontData, fontSize, 22.f);
 
+        m_compareMode = g_options.compare;
+
         // Begin loading the inputs specified on the command line.
         // The type of inputs and their consistency is validated in ProcessCommandLine.
         switch (g_options.inputType)
@@ -516,12 +535,13 @@ public:
             case ToolInputType::Images:
                 BeginLoadingImagesFromFileList(g_options.sourcePaths);
                 break;
-            case ToolInputType::Manifest:
+            case ToolInputType::ManifestFile:
                 assert(!g_options.sourcePaths.empty());
                 BeginLoadingImagesFromManifest(g_options.sourcePaths[0]);
                 break;
             case ToolInputType::CompressedTextureSet:
                 assert(!g_options.sourcePaths.empty());
+                m_manifest = std::nullopt;
                 CompressionResult* result = LoadCompressedTextureSet(g_options.sourcePaths[0], true);
                 if (result)
                 {
@@ -884,14 +904,14 @@ public:
         ClearImages();
         bool isFirstFile = true;
 
-        m_manifestWidth = manifest.width;
-        m_manifestHeight = manifest.height;
+        m_manifest = manifest;
+        int manifestIndex = 0;
 
         for (ManifestEntry const& entry : manifest.textures)
         {
             ++m_texturesToLoad;
 
-            m_executor.async([this, entry]()
+            m_executor.async([this, entry, manifestIndex]()
             {
                 MaterialImage image{};
 
@@ -953,18 +973,37 @@ public:
 
                 image.name = entry.entryName;
                 image.isSRGB = entry.isSRGB;
+                image.manifestIndex = manifestIndex;
                 image.manifestSemantics = entry.semantics;
                 image.bcFormat = entry.bcFormat;
                 image.ComputeUncompressedSize();
-                
-                // Explorer doesn't support per-channel loss scaling, so just use the first one if there are multiple
-                if (!entry.lossFunctionScales.empty())
-                    image.lossFunctionScale = entry.lossFunctionScales[0];
+
+                // Process loss function scales and expand to per-channel if needed
+                if (entry.lossFunctionScales.size() == 1)
+                {
+                    image.lossFunctionScales.resize(image.channels, entry.lossFunctionScales[0]);
+                }
+                else if (entry.lossFunctionScales.size() == size_t(image.channels))
+                {
+                    image.lossFunctionScales = entry.lossFunctionScales;
+                }
+                else
+                {
+                    image.lossFunctionScales.resize(image.channels, 1.f);
+
+                    if (!entry.lossFunctionScales.empty())
+                    {
+                        log::warning("Ignoring invalid loss function scales for image '%s'.\n", entry.fileName.c_str());
+                    }
+                }
+                assert(image.lossFunctionScales.size() == size_t(image.channels));
 
                 m_images.push_back(std::move(image));
 
                 ++m_texturesLoaded;
             });
+
+            ++manifestIndex;
         }
     }
 
@@ -976,15 +1015,20 @@ public:
     void NewTexturesLoaded()
     {
         // Make the 2D view fit the new textures to the window
-        m_flatImageView->Reset();
+        m_flatImageView->Reset(m_compareMode);
 
         // Select the albedo texture, if this semantic is defined, otherwise the first one
         m_selectedImage = 0;
-        for (auto& semantic : m_semanticBindings)
+        if (!m_compareMode)
         {
-            if (semantic.label == SemanticLabel::Albedo)
-                m_selectedImage = semantic.imageIndex;
+            for (auto& semantic : m_semanticBindings)
+            {
+                if (semantic.label == SemanticLabel::Albedo)
+                    m_selectedImage = semantic.imageIndex;
+            }
         }
+
+        m_editingImage = -1;
     }
 
     bool KeyboardUpdate(int key, int scancode, int action, int mods) override
@@ -1070,7 +1114,7 @@ public:
 
     bool RegisterSharedTextures(MaterialImage& image)
     {
-        if (g_options.noshared)
+        if (g_options.noshared || m_compareMode)
             return false;
 
         if (!m_cudaAvailable)
@@ -1165,10 +1209,10 @@ public:
         m_texturesLoaded = 0;
         m_texturesToLoad = 0;
         m_selectedImage = 0;
+        m_editingImage = -1;
         m_compressionCounter = 0;
-        m_manifestWidth = std::nullopt;
-        m_manifestHeight = std::nullopt;
-
+        m_manifest = std::nullopt;
+        
         for (auto& image : m_images)
         {
             if (image.referenceTextureShared)
@@ -1206,13 +1250,16 @@ public:
         }
 
         // Override the texture set dimensions from the manifest, if specified
-        m_textureSetDesc.width = m_manifestWidth.value_or(m_maxOriginalWidth);
-        m_textureSetDesc.height = m_manifestHeight.value_or(m_maxOriginalHeight);
+        if (m_manifest.has_value())
+        {
+            m_textureSetDesc.width = m_manifest->width.value_or(m_maxOriginalWidth);
+            m_textureSetDesc.height = m_manifest->height.value_or(m_maxOriginalHeight);
+        }
 
         m_numTextureSetMips = GetNumMipLevels(m_textureSetDesc.width, m_textureSetDesc.height);
         SetCompressMipChain(false);
 
-        bool useSharedTextures = !g_options.noshared;
+        bool useSharedTextures = !g_options.noshared && !m_compareMode;
 
         // Create the texture objects and upload data into the reference textures.
         int imageIndex = 0;
@@ -1262,6 +1309,24 @@ public:
             }
 
             ++imageIndex;
+        }
+
+        if (m_compareMode)
+        {
+            {
+                MaterialImage& leftImage = m_images[0];
+                MaterialImage& rightImage = m_images[1];
+                leftImage.decompressedTextureLeft = leftImage.referenceTexture;
+                leftImage.decompressedTextureRight = rightImage.referenceTexture;
+                leftImage.referenceTexture = nullptr;
+                m_leftImageName = leftImage.name;
+                m_rightImageName = rightImage.name;
+            }
+
+            m_useLeftDecompressedImage = true;
+            m_useRightDecompressedImage = true;
+
+            m_images.resize(1);
         }
 
         m_sharedTexturesAvailable = useSharedTextures;
@@ -1329,20 +1394,18 @@ public:
         if (weightType == ntc::InferenceWeightType::Unknown)
             return ntc::Status::Unsupported;
         
-        // Open the command list, upload the latents and weights
-        m_commandList->open();
-        m_commandList->beginMarker("Upload NTC Data");
-        if (!m_decompressionPass.SetLatentDataFromTextureSet(m_commandList, inputStream, metadata))
+        // Upload the latents and weights
+        if (!m_decompressionPass.SetLatentDataFromTextureSet(m_commandList, m_ntcContext.Get(),
+            nullptr, inputStream, metadata))
         {
-            m_commandList->close();
             return ntc::Status::InternalError;
         }
+        m_commandList->open();
         if (!m_decompressionPass.SetWeightsFromTextureSet(m_commandList, metadata, weightType))
         {
             m_commandList->close();
             return ntc::Status::InternalError;
         }
-        m_commandList->endMarker();
 
         // Begin the decompression region
         m_commandList->beginMarker("Decompress");
@@ -1410,6 +1473,15 @@ public:
         return ntc::Status::Ok;
     }
 
+    ntc::LosslessCompressionSettings GetLosslessCompressionParams() const
+    {
+        ntc::LosslessCompressionSettings params;
+        params.algorithm = ntc::CompressionType::GDeflate;
+        params.compressBCModeBuffers = true; // We don't make those here anyway
+        params.compressLatents = m_enableGDeflate;
+        return params;
+    }
+
     bool DecompressIntoTextures(bool recordResults, bool useRightTextures, bool enableInt8, time_point<steady_clock> beginTime)
     {
         if (!m_cudaAvailable)
@@ -1433,6 +1505,8 @@ public:
             result.compressMipChain = m_textureSetDesc.mips > 1;
             for (int mip = 0; mip < m_textureSetDesc.mips; ++mip)
                 result.perMipPSNR[mip] = ntc::LossToPSNR(stats.perMipLoss[mip]);
+            for (int channel = 0; channel < textureSetDesc.channels; ++channel)
+                result.perChannelMSE[channel] = stats.perChannelLoss[channel];
             result.experimentalKnob = m_experimentalKnob;
             result.ordinal = ++m_compressionCounter;
             
@@ -1441,6 +1515,11 @@ public:
 
             size_t bufferSize = m_textureSet->GetOutputStreamSize();
             result.compressedData = std::make_shared<std::vector<uint8_t>>(bufferSize);
+
+            result.useGDeflate = m_enableGDeflate;
+
+            ntcStatus = m_textureSet->ConfigureLosslessCompression(GetLosslessCompressionParams());
+            CHECK_NTC_RESULT(ConfigureLosslessCompression);
 
             ntcStatus = m_textureSet->SaveToMemory(result.compressedData->data(), &bufferSize);
             CHECK_NTC_RESULT(SaveToMemory);
@@ -1808,9 +1887,9 @@ public:
         // Apply the per-image loss function scales to the appropriate channels
         for (auto const& image : m_images)
         {
-            for (int channel = image.firstChannel; channel < image.firstChannel + image.channels; ++channel)
+            for (int channel = 0; channel < image.channels; ++channel)
             {
-                m_compressionSettings.lossFunctionScales[channel] = image.lossFunctionScale;
+                m_compressionSettings.lossFunctionScales[image.firstChannel + channel] = image.lossFunctionScales[channel];
             }
         }
         
@@ -1913,11 +1992,78 @@ public:
 
     void SaveCompressedTextureSet(const char* fileName) const
     {
-        ntc::Status ntcStatus = m_textureSet->SaveToFile(fileName);
+        ntc::Status ntcStatus = m_textureSet->ConfigureLosslessCompression(GetLosslessCompressionParams());
+        if (ntcStatus != ntc::Status::Ok)
+        {
+            log::error("Call to ConfigureLosslessCompression failed, code = %s: %s",
+                ntc::StatusToString(ntcStatus), ntc::GetLastErrorMessage());
+            return;
+        }
+
+        ntcStatus = m_textureSet->SaveToFile(fileName);
         if (ntcStatus != ntc::Status::Ok)
         {
             log::error("Failed to save texture set to file '%s', code = %s: %s", fileName,
                 ntc::StatusToString(ntcStatus), ntc::GetLastErrorMessage());
+            return;
+        }
+    }
+
+    void SaveManifestToFile(const char* fileName) const
+    {
+        if (!m_manifest.has_value())
+            return;
+
+        Manifest manifest = m_manifest.value();
+        
+        // Patch the manifest with the current image properties
+        int manifestIndex = 0;
+        for (ManifestEntry& texture : manifest.textures)
+        {
+            // Find the image corresponding to this manifest entry
+            for (MaterialImage const& image : m_images)
+            {
+                if (image.manifestIndex == manifestIndex)
+                {
+                    texture.isSRGB = image.isSRGB;
+                    
+                    float scale = image.lossFunctionScales[0];
+                    bool scalesAreUniform = true;
+                    for (int channel = 1; channel < image.channels; ++channel)
+                    {
+                        if (image.lossFunctionScales[channel] != scale)
+                        {
+                            scalesAreUniform = false;
+                            break;
+                        }
+                    }
+                    if (!scalesAreUniform || scale != 1.f)
+                        texture.lossFunctionScales = image.lossFunctionScales;
+                        
+                    break;
+                }
+            }
+
+            // Replace the semantics with the current ones, potentially modified by the user
+            texture.semantics.clear();
+            for (const auto& binding : m_semanticBindings)
+            {
+                if (m_images[binding.imageIndex].manifestIndex == manifestIndex)
+                {
+                    ImageSemanticBinding imageBinding;
+                    imageBinding.label = binding.label;
+                    imageBinding.firstChannel = binding.firstChannel;
+                    texture.semantics.push_back(imageBinding);
+                }
+            }
+
+            ++manifestIndex;
+        }
+
+        std::string errorMessage;
+        if (!WriteManifestToFile(fileName, manifest, errorMessage))
+        {
+            log::error("%s", errorMessage.c_str());
             return;
         }
     }
@@ -2012,177 +2158,8 @@ public:
             m_flatImageView->ReadPixel();
     }
 
-    void buildUI() override
+    void BuildSettingsDialog(float fontSize, bool& openImageSettings)
     {
-        if (m_loading || m_images.empty())
-        {
-            ImGui::PushFont(m_PrimaryFont->GetScaledFont());
-            BeginFullScreenWindow();
-            if (m_loading)
-            {
-                char buf[256];
-                snprintf(buf, sizeof(buf), "Loading images: %d/%d, %d errors", m_texturesLoaded, m_texturesToLoad, m_errors);
-                DrawScreenCenteredText(buf);
-            }
-            else
-            {
-                DrawScreenCenteredText("No images loaded.");
-            }
-            EndFullScreenWindow();
-            ImGui::PopFont();
-
-            if (m_loading)
-                return;
-        }
-
-        // Various UI-related things are written from the compression thread
-        std::lock_guard lock(m_mutex);
-
-        ImGui::PushFont(m_PrimaryFont->GetScaledFont());
-        float const fontSize = ImGui::GetFontSize();
-
-        bool openViewerHelp = false;
-
-        if (ImGui::BeginMainMenuBar())
-        {
-            if (ImGui::BeginMenu("File"))
-            {
-                if (ImGui::MenuItem("Load Images from Folder..."))
-                {
-                    static std::string defaultPath = app::GetDirectoryWithExecutable().string();
-                    std::string path;
-                    if (app::FolderDialog("Select a folder with images", defaultPath.c_str(), path))
-                    {
-                        defaultPath = path;
-                        BeginLoadingImagesFromDirectory(path.c_str());
-                    }
-                }
-                if (ImGui::MenuItem("Load Images with Manifest..."))
-                {
-                    std::string fileName;
-                    if (app::FileDialog(true, "JSON manifest files\0*.json\0All files\0*.*\0", fileName))
-                    {
-                        BeginLoadingImagesFromManifest(fileName.c_str());
-                    }
-                }
-                if (ImGui::MenuItem("Load Compressed File...", nullptr, nullptr))
-                {
-                    std::string fileName;
-                    if (app::FileDialog(true, "NTC files\0*.ntc\0All files\0*.*\0", fileName))
-                    {
-                        bool const imagesWereEmpty = m_images.empty();
-                        CompressionResult* result = LoadCompressedTextureSet(fileName.c_str(), true);
-                        if (result)
-                        {
-                            RestoreCompressedTextureSet(*result, /* useRightTextures = */ !imagesWereEmpty);
-                            if (imagesWereEmpty)
-                                NewTexturesLoaded();
-                        }
-                    }
-                }
-                if (ImGui::MenuItem("Save Compressed File...", nullptr, nullptr, m_compressedTextureSetAvailable))
-                {
-                    std::string fileName;
-                    if (app::FileDialog(false, "NTC files \0*.ntc\0All files\0*.*\0", fileName))
-                    {
-                        SaveCompressedTextureSet(fileName.c_str());
-                    }
-                }
-                if (ImGui::MenuItem("Unload Images", nullptr, nullptr, !m_images.empty()))
-                {
-                    ClearImages();
-                }
-                ImGui::EndMenu();
-            }
-
-            if (ImGui::BeginMenu("Options"))
-            {
-                ImGui::MenuItem("Show Compression Progress", nullptr, &m_showCompressionProgress);
-                ImGui::MenuItem("Developer UI", nullptr, &m_developerUI);
-                ImGui::EndMenu();
-            }
-
-            if (ImGui::BeginMenu("Help"))
-            {
-                if (ImGui::MenuItem("Using the Viewer"))
-                {
-                    openViewerHelp = true;
-                }
-                ImGui::EndMenu();
-            }
-
-            ImGui::EndMainMenuBar();
-        }
-
-        if (openViewerHelp)
-            ImGui::OpenPopup("ViewerHelp");
-
-        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-        ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-        if (ImGui::BeginPopup("ViewerHelp", ImGuiWindowFlags_AlwaysAutoResize))
-        {
-            ImGui::BeginTable("Help", 2);
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted("2D Viewer:");
-
-            ImGui::Indent();
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("Pan the image");
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("LMB or touchpad scroll");
-
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("Zoom");
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("Mouse wheel or touchpad zoom gesture");
-            
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("Move the A/B slider");
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("RMB or Shift+LMB");
-            ImGui::Unindent();
-
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted("3D Viewer:");
-
-            ImGui::Indent();
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("Rotate the camera");
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("LMB");
-
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("Zoom");
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("Mouse wheel or touchpad zoom gesture");
-            
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("Move the A/B slider");
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("RMB or Shift+LMB");
-
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("Move the light");
-            ImGui::TableNextColumn(); ImGui::TextUnformatted("Ctrl+LMB");
-            ImGui::Unindent();
-
-            ImGui::EndTable();
-            ImGui::Dummy(ImVec2(0.f, fontSize));
-
-            ImGuiStyle& style = ImGui::GetStyle();
-            float avail = ImGui::GetContentRegionAvail().x;
-            float buttonWidth = fontSize * 8.f;
-            float offset = (avail - buttonWidth) * 0.5f;
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset);
-
-            if (ImGui::Button("OK", ImVec2(buttonWidth, 0)))
-                ImGui::CloseCurrentPopup();
-
-            ImGui::End();
-        }
-        
-        if (m_images.empty())
-        {
-            ImGui::PopFont();
-            return;
-        }
-
         ImGui::SetNextWindowPos(ImVec2(fontSize * 0.6f, fontSize * 2.f), 0);
         ImGui::SetNextWindowSizeConstraints(ImVec2(), ImVec2(FLT_MAX, ImGui::GetIO().DisplaySize.y - fontSize * 3.f));
         if (ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
@@ -2201,28 +2178,7 @@ public:
                 if (ImGui::RadioButton(image.name.c_str(), index == m_selectedImage))
                     m_selectedImage = index;
 
-                if (image.format == ntc::ChannelFormat::UNORM8 || image.format == ntc::ChannelFormat::UNORM16)
-                {
-                    ImGui::SameLine(fontSize * 10.f);
-                    if (ImGui::Checkbox("sRGB", &image.isSRGB))
-                    {
-                        image.referenceMipsValid = false;
-                        image.textureSetDataValid = false;
-                    }
-                }
-                ImGui::SameLine(fontSize * 14.f);
-                ImGui::PushItemWidth(fontSize * 3.f);
-                ImGui::SliderFloat("##LossScale", &image.lossFunctionScale, 0.1f, 10.f, "%.2f", ImGuiSliderFlags_Logarithmic);
-                if (index == 0 && ImGui::IsItemHovered())
-                {
-                    ImGui::BeginTooltip();
-                    ImGui::TextUnformatted("Loss function scale for textures.\n"
-                        "Higher values make the texture compress more accurately than others.");
-                    ImGui::EndTooltip();
-                }
-                ImGui::PopItemWidth();
-
-                ImGui::SameLine(fontSize * 17.4f);
+                ImGui::SameLine(fontSize * 12.f);
                 ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(128, 128, 128, 255));
                 if (image.bcFormat != ntc::BlockCompressedFormat::None)
                 {
@@ -2242,6 +2198,13 @@ public:
                     ImGui::Text("%sx%d", shortFormat, image.channels);
                 }
                 ImGui::PopStyleColor();
+
+                ImGui::SameLine(fontSize * 16.f);
+                if (ImGui::Button(" ... "))
+                {
+                    openImageSettings = true;
+                    m_editingImage = index;
+                }
 
                 ImGui::PopID();
                 ++index;
@@ -2402,7 +2365,7 @@ public:
                 ImGui::DragInt("kPixels Per Batch", &m_compressionSettings.kPixelsPerBatch, 1.f, 1, NTC_MAX_KPIXELS_PER_BATCH);
                 ImGui::TooltipMarker("The number of kilopixels to use in each training step.\n"
                     "Higher pixel count yields higher image quality, up to a certain point.");
-                
+
                 if (m_developerUI)
                 {
                     ImGui::DragInt("Reporting Steps", &m_compressionSettings.stepsPerIteration, 10.f, 1, 10'000);
@@ -2437,6 +2400,10 @@ public:
                 ImGui::TooltipMarker("Ignore the data in all other channels for pixels where alpha mask is 0.\n"
                     "Requires the Use Alpha Mask Channel option to be active.");
                 
+                ImGui::Checkbox("Use GDeflate", &m_enableGDeflate);
+                ImGui::TooltipMarker("Enables the use of GDeflate compression for latent data and BC7 mode buffers.\n"
+                    "Note that this setting makes final files somewhat smaller, but it does not affect the estimated size.");
+
                 if (m_developerUI)
                 {
                     ImGui::Checkbox("Enable Int8 restore", &m_useInt8Decompression);
@@ -2556,6 +2523,257 @@ public:
         }
         // End of window
         ImGui::End();
+    }
+
+    void buildUI() override
+    {
+        if (m_loading || m_images.empty())
+        {
+            ImGui::PushFont(m_PrimaryFont->GetScaledFont());
+            BeginFullScreenWindow();
+            if (m_loading)
+            {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "Loading images: %d/%d, %d errors", m_texturesLoaded, m_texturesToLoad, m_errors);
+                DrawScreenCenteredText(buf);
+            }
+            else
+            {
+                DrawScreenCenteredText("No images loaded.");
+            }
+            EndFullScreenWindow();
+            ImGui::PopFont();
+
+            if (m_loading)
+                return;
+        }
+
+        // Various UI-related things are written from the compression thread
+        std::lock_guard lock(m_mutex);
+
+        ImGui::PushFont(m_PrimaryFont->GetScaledFont());
+        float const fontSize = ImGui::GetFontSize();
+
+        bool openViewerHelp = false;
+
+        if (ImGui::BeginMainMenuBar())
+        {
+            if (ImGui::BeginMenu("File"))
+            {
+                if (ImGui::MenuItem("Load Images from Folder..."))
+                {
+                    static std::string defaultPath = app::GetDirectoryWithExecutable().string();
+                    std::string path;
+                    if (app::FolderDialog("Select a folder with images", defaultPath.c_str(), path))
+                    {
+                        defaultPath = path;
+                        m_compareMode = false;
+                        BeginLoadingImagesFromDirectory(path.c_str());
+                    }
+                }
+                if (ImGui::MenuItem("Load Images with Manifest..."))
+                {
+                    std::string fileName;
+                    if (app::FileDialog(true, "JSON manifest files\0*.json\0All files\0*.*\0", fileName))
+                    {
+                        m_compareMode = false;
+                        BeginLoadingImagesFromManifest(fileName.c_str());
+                    }
+                }
+                if (ImGui::MenuItem("Load Compressed File..."))
+                {
+                    std::string fileName;
+                    if (app::FileDialog(true, "NTC files\0*.ntc\0All files\0*.*\0", fileName))
+                    {
+                        if (m_compareMode)
+                        {
+                            ClearImages();
+                            m_compareMode = false;
+                        }
+                        
+                        bool const imagesWereEmpty = m_images.empty();
+                        CompressionResult* result = LoadCompressedTextureSet(fileName.c_str(), true);
+                        if (result)
+                        {
+                            RestoreCompressedTextureSet(*result, /* useRightTextures = */ !imagesWereEmpty);
+                            if (imagesWereEmpty)
+                                NewTexturesLoaded();
+                        }
+                    }
+                }
+                if (ImGui::MenuItem("Compare Two Images..."))
+                {
+                    char const* filter = "Image files\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.hdr;*.exr\0All files\0*.*\0";
+                    std::string fileNameA;
+                    if (app::FileDialog(true, filter, fileNameA))
+                    {
+                        std::string fileNameB;
+                        if (app::FileDialog(true, filter, fileNameB))
+                        {
+                            m_compareMode = true;
+                            BeginLoadingImagesFromFileList({ fileNameA.c_str(), fileNameB.c_str() });
+                        }
+                    }
+                }
+                if (ImGui::MenuItem("Save Compressed File...", nullptr, nullptr, m_compressedTextureSetAvailable))
+                {
+                    std::string fileName;
+                    if (app::FileDialog(false, "NTC files \0*.ntc\0All files\0*.*\0", fileName))
+                    {
+                        SaveCompressedTextureSet(fileName.c_str());
+                    }
+                }
+                if (ImGui::MenuItem("Save Manifest...", nullptr, nullptr, m_manifest.has_value()))
+                {
+                    std::string fileName;
+                    if (app::FileDialog(false, "JSON manifest files\0*.json\0All files\0*.*\0", fileName))
+                    {
+                        SaveManifestToFile(fileName.c_str());
+                    }
+                }
+                if (ImGui::MenuItem("Unload Images", nullptr, nullptr, !m_images.empty()))
+                {
+                    ClearImages();
+                    m_compareMode = false;
+                }
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("Options"))
+            {
+                ImGui::MenuItem("Show Compression Progress", nullptr, &m_showCompressionProgress);
+                ImGui::MenuItem("Developer UI", nullptr, &m_developerUI);
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("Help"))
+            {
+                if (ImGui::MenuItem("Using the Viewer"))
+                {
+                    openViewerHelp = true;
+                }
+                ImGui::EndMenu();
+            }
+
+            ImGui::EndMainMenuBar();
+        }
+
+        if (openViewerHelp)
+            ImGui::OpenPopup("ViewerHelp");
+
+        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        if (ImGui::BeginPopup("ViewerHelp", ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ImGui::BeginTable("Help", 2);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted("2D Viewer:");
+
+            ImGui::Indent();
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("Pan the image");
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("LMB or touchpad scroll");
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("Zoom");
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("Mouse wheel or touchpad zoom gesture");
+            
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("Move the A/B slider");
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("RMB or Shift+LMB");
+            ImGui::Unindent();
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted("3D Viewer:");
+
+            ImGui::Indent();
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("Rotate the camera");
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("LMB");
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("Zoom");
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("Mouse wheel or touchpad zoom gesture");
+            
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("Move the A/B slider");
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("RMB or Shift+LMB");
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("Move the light");
+            ImGui::TableNextColumn(); ImGui::TextUnformatted("Ctrl+LMB");
+            ImGui::Unindent();
+
+            ImGui::EndTable();
+            ImGui::Dummy(ImVec2(0.f, fontSize));
+
+            ImGuiStyle& style = ImGui::GetStyle();
+            float avail = ImGui::GetContentRegionAvail().x;
+            float buttonWidth = fontSize * 8.f;
+            float offset = (avail - buttonWidth) * 0.5f;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset);
+
+            if (ImGui::Button("OK", ImVec2(buttonWidth, 0)))
+                ImGui::CloseCurrentPopup();
+
+            ImGui::End();
+        }
+        
+        if (m_images.empty())
+        {
+            ImGui::PopFont();
+            return;
+        }
+
+        bool openImageSettings = false;
+
+        if (!m_compareMode)
+        {
+            BuildSettingsDialog(fontSize, openImageSettings);
+        }
+
+        if (openImageSettings)
+            ImGui::OpenPopup("ImageSettings");
+
+        if (ImGui::BeginPopup("ImageSettings"))
+        {
+            if (m_editingImage >= 0 && m_editingImage < int(m_images.size()))
+            {
+                MaterialImage& image = m_images[m_editingImage];
+
+                ImGui::Text("Image settings for '%s'", image.name.c_str());
+                ImGui::Separator();
+
+                if (image.format == ntc::ChannelFormat::UNORM8 || image.format == ntc::ChannelFormat::UNORM16)
+                {
+                    if (ImGui::Checkbox("sRGB", &image.isSRGB))
+                    {
+                        image.referenceMipsValid = false;
+                        image.textureSetDataValid = false;
+                    }
+                }
+
+                float const minScale = 0.1f;
+                float const maxScale = 10.f;
+                ImGui::PushItemWidth(fontSize * 5.f * float(image.channels));
+                ImGui::SliderScalarN("Loss scale(s)", ImGuiDataType_Float, image.lossFunctionScales.data(),
+                    image.channels, &minScale, &maxScale, "%.2f", ImGuiSliderFlags_Logarithmic);
+                ImGui::PopItemWidth();
+                
+                ImGui::TooltipMarker("Loss function scale for the channels of this texture.\n"
+                    "Higher values make the channels compress more accurately than other channels in the texture set.");
+
+                if (ImGui::Button("Reset loss scales"))
+                {
+                    for (float& scale : image.lossFunctionScales)
+                        scale = 1.f;
+                }
+            }
+
+            ImGui::EndPopup();
+        }
 
         m_modelView->SetImageName(false, m_leftImageName);
         m_modelView->SetImageName(true, m_rightImageName);
@@ -2627,6 +2845,9 @@ public:
             setupRow("Bits per pixel");             ImGui::Text("%.2f", m_selectedCompressionResult.bitsPerPixel);
             setupRow("Stored texture size");        ImGui::Text("%.2f MB", float(m_selectedCompressionResult.compressedData->size()) / 1'048'576.f);
             setupRow("Compress MIP chain");         ImGui::Text("%s", m_selectedCompressionResult.compressMipChain ? "YES" : "NO");
+            setupRow("GDeflate");                   ImGui::Text("%s", m_selectedCompressionResult.useGDeflate.has_value() 
+                                                                        ? (m_selectedCompressionResult.useGDeflate.value() ? "YES" : "NO")
+                                                                        : "N/A");
             setupRow("Random seed");                ImGui::Text("%d", m_selectedCompressionResult.compressionSettings.randomSeed);
             setupRow("Stable training");            ImGui::Text("%s", m_selectedCompressionResult.compressionSettings.stableTraining ? "YES" : "NO");
             setupRow("Grid size scale");            ImGui::Text("%d", m_selectedCompressionResult.latentShape.gridSizeScale);
@@ -2647,6 +2868,36 @@ public:
                 snprintf(buf, sizeof buf, "Mip %d PSNR", mip);
                 setupRow(buf);
                 ImGui::Text("%.2f dB", m_selectedCompressionResult.perMipPSNR[mip]);
+            }
+
+            ImGui::Separator();
+            for (size_t i = 0; i < m_images.size(); ++i)
+            {
+                MaterialImage& image = m_images[i];
+                setupRow(image.name.c_str());
+                
+                std::stringstream ss;
+                float textureMSE = 0.f;
+                for (int ch = 0; ch < image.channels; ++ch)
+                {
+                    textureMSE += m_selectedCompressionResult.perChannelMSE[ch + image.firstChannel];
+                }
+                textureMSE /= float(image.channels);
+                ss << std::fixed << std::setprecision(2);
+                ss << ntc::LossToPSNR(textureMSE) << " dB";
+                if (image.channels > 1)
+                {
+                    ss << " [";
+                    for (int ch = 0; ch < image.channels; ++ch)
+                    {
+                        if (ch > 0)
+                            ss << ", ";
+                        float channelPSNR = ntc::LossToPSNR(m_selectedCompressionResult.perChannelMSE[ch + image.firstChannel]);
+                        ss << channelPSNR;
+                    }
+                    ss << "]";
+                }
+                ImGui::TextUnformatted(ss.str().c_str());
             }
 
             ImGui::EndTable();
@@ -2744,7 +2995,7 @@ int main(int __argc, const char** __argv)
         deviceParams.enableNvrhiValidationLayer = true;
     }
 
-    SetNtcGraphicsDeviceParameters(deviceParams, graphicsApi, true, g_ApplicationName);
+    SetNtcGraphicsDeviceParameters(deviceParams, graphicsApi, true, g_options.enableCoopVec, g_ApplicationName);
 
     if (!deviceManager->CreateInstance(deviceParams))
     {

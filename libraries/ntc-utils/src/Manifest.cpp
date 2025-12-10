@@ -14,7 +14,10 @@
 #include <filesystem>
 #include <json/value.h>
 #include <json/reader.h>
+#include <json/writer.h>
 #include <algorithm>
+#include <fstream>
+#include <iostream>
 
 namespace fs = std::filesystem;
 
@@ -286,39 +289,21 @@ int GetSemanticChannelCount(SemanticLabel label)
     }
 }
 
-bool ReadManifestFromFile(const char* fileName, Manifest& outManifest, std::string& outError)
+static bool ParseManifest(char const* jsonData, size_t jsonSize, char const* manifestFileName, Manifest& outManifest, std::string& outError)
 {
     Json::CharReaderBuilder builder;
     builder["collectComments"] = false;
     Json::CharReader* reader = builder.newCharReader();
 
-    FILE* inputFile = fopen(fileName, "rb");
-    if (!inputFile)
-    {
-        std::ostringstream oss;
-        oss << "Cannot open manifest file '" << fileName << "': " << strerror(errno);
-        outError = oss.str();
-        return false;
-    }
-
-    std::vector<char> fileContents;
-    bool success = ReadFileIntoVector(inputFile, fileContents);
-    fclose(inputFile);
-    
-    if (!success)
-    {
-        std::ostringstream oss;
-        oss << "Error while reading manifest file '" << fileName << "': " << strerror(errno);
-        outError = oss.str();
-        return false;
-    }
-
     Json::Value root;
     Json::String errorMessages;
-    if (!reader->parse(fileContents.data(), fileContents.data() + fileContents.size(), &root, &errorMessages))
+    if (!reader->parse(jsonData, jsonData + jsonSize, &root, &errorMessages))
     {
         std::ostringstream oss;
-        oss << "Cannot parse manifest file '" << fileName << "': " << errorMessages;
+        if (!manifestFileName)
+            oss << "Cannot parse the manifest: " << errorMessages;
+        else
+            oss << "Cannot parse manifest file '" << manifestFileName << "': " << errorMessages;
         outError = oss.str();
         return false;
     }
@@ -346,7 +331,6 @@ bool ReadManifestFromFile(const char* fileName, Manifest& outManifest, std::stri
             outManifest.height = root["height"].asInt();
     }
 
-    fs::path const manifestPath = fs::path(fileName).parent_path();
     for (const auto& node: textures)
     {
         if (!node.isObject())
@@ -358,7 +342,10 @@ bool ReadManifestFromFile(const char* fileName, Manifest& outManifest, std::stri
         std::string const fileName = node["fileName"].asString();
 
         ManifestEntry entry;
-        entry.fileName = (manifestPath / fileName).generic_string();
+        if (manifestFileName)
+            entry.fileName = (fs::path(manifestFileName).parent_path() / fileName).generic_string();
+        else
+            entry.fileName = fileName;
         entry.entryName = node["name"].asString();
         if (entry.entryName.empty())
             entry.entryName = fs::path(fileName).stem().generic_string();
@@ -493,6 +480,160 @@ bool ReadManifestFromFile(const char* fileName, Manifest& outManifest, std::stri
     return true;
 }
 
+bool ReadManifestFromFile(const char* fileName, Manifest& outManifest, std::string& outError)
+{
+    FILE* inputFile = fopen(fileName, "rb");
+    if (!inputFile)
+    {
+        std::ostringstream oss;
+        oss << "Cannot open manifest file '" << fileName << "': " << strerror(errno);
+        outError = oss.str();
+        return false;
+    }
+
+    std::vector<char> fileContents;
+    bool success = ReadFileIntoVector(inputFile, fileContents);
+    fclose(inputFile);
+    
+    if (!success)
+    {
+        std::ostringstream oss;
+        oss << "Error while reading manifest file '" << fileName << "': " << strerror(errno);
+        outError = oss.str();
+        return false;
+    }
+
+    return ParseManifest(fileContents.data(), fileContents.size(), fileName, outManifest, outError);
+}
+
+bool ReadManifestFromStdin(Manifest& outManifest, std::string& outError)
+{
+    std::stringstream ss;
+    std::string line;
+    while (std::getline(std::cin, line))
+    {
+        ss << line;
+        if (!std::cin.eof())
+            ss << std::endl;
+    }
+
+    std::string const inputString = ss.str();
+
+    return ParseManifest(inputString.data(), inputString.size(), nullptr, outManifest, outError);
+}
+
+bool WriteManifestToFile(const char* fileName, const Manifest& manifest, std::string& outError)
+{
+    fs::path const manifestDir = fs::absolute(fileName).parent_path();
+
+    Json::Value root;
+    if (manifest.width.has_value())
+        root["width"] = manifest.width.value();
+    if (manifest.height.has_value())
+        root["height"] = manifest.height.value();
+    Json::Value textures(Json::arrayValue);
+
+    for (const ManifestEntry& entry : manifest.textures)
+    {
+        // Update the texture file name to be relative to the new manifest file location
+        std::string textureFileName = entry.fileName;
+        if (!textureFileName.empty())
+        {
+            fs::path const texturePath = fs::absolute(textureFileName);
+            std::error_code ec;
+            fs::path relativePath = fs::relative(texturePath, manifestDir, ec);
+            if (!ec && !relativePath.empty())
+            {
+                textureFileName = relativePath.generic_string();
+            }
+        }
+        
+        Json::Value node;
+        node["fileName"] = textureFileName;
+        node["name"] = entry.entryName;
+        node["isSRGB"] = entry.isSRGB;
+        if (entry.mipLevel > 0)
+            node["mipLevel"] = entry.mipLevel;
+        if (entry.verticalFlip)
+            node["verticalFlip"] = entry.verticalFlip;
+        if (!entry.channelSwizzle.empty())
+            node["channelSwizzle"] = entry.channelSwizzle;
+        if (entry.firstChannel >= 0)
+            node["firstChannel"] = entry.firstChannel;
+
+        // BC format
+        switch(entry.bcFormat)
+        {
+            case BlockCompressedFormat_Auto:
+                // "auto" is a custom value used in the SDK, not part of the official enum
+                node["bcFormat"] = "auto";
+                break;
+            case ntc::BlockCompressedFormat::None:
+                // "none" is the default, no need to write it out
+                break;
+            default:
+                node["bcFormat"] = ntc::BlockCompressedFormatToString(entry.bcFormat);
+                break;
+        }
+
+        // Semantics
+        if (!entry.semantics.empty())
+        {
+            Json::Value semanticsNode(Json::objectValue);
+            for (const auto& binding : entry.semantics)
+            {
+                std::string labelStr = SemanticLabelToString(binding.label);
+                std::string channels;
+                static const char* channelMap = "RGBA";
+                int count = GetSemanticChannelCount(binding.label);
+                if (binding.firstChannel >= 0 && binding.firstChannel + count <= 4)
+                    channels.assign(channelMap + binding.firstChannel, channelMap + binding.firstChannel + count);
+                semanticsNode[labelStr] = channels;
+            }
+            node["semantics"] = semanticsNode;
+        }
+
+        // Loss function scales
+        if (!entry.lossFunctionScales.empty())
+        {
+            if (entry.lossFunctionScales.size() == 1)
+                node["lossFunctionScale"] = entry.lossFunctionScales[0];
+            else
+            {
+                Json::Value arr(Json::arrayValue);
+                for (float v : entry.lossFunctionScales)
+                    arr.append(v);
+                node["lossFunctionScale"] = arr;
+            }
+        }
+
+        textures.append(node);
+    }
+
+    root["textures"] = textures;
+
+    Json::StreamWriterBuilder writerBuilder;
+    writerBuilder["indentation"] = "  ";
+    std::unique_ptr<Json::StreamWriter> writer(writerBuilder.newStreamWriter());
+
+    std::ofstream ofs(fileName, std::ios::out | std::ios::trunc);
+    if (!ofs)
+    {
+        std::ostringstream oss;
+        oss << "Cannot open manifest file '" << fileName << "' for writing: " << strerror(errno);
+        outError = oss.str();
+        return false;
+    }
+
+    if (writer->write(root, &ofs) != 0)
+    {
+        outError = "Failed to write manifest JSON to file.";
+        return false;
+    }
+
+    return true;
+}
+
 void UpdateToolInputType(ToolInputType& current, ToolInputType newInput)
 {
     switch(current)
@@ -503,7 +644,8 @@ void UpdateToolInputType(ToolInputType& current, ToolInputType newInput)
             return;
         case ToolInputType::Directory:
         case ToolInputType::CompressedTextureSet:
-        case ToolInputType::Manifest:
+        case ToolInputType::ManifestFile:
+        case ToolInputType::ManifestStdin:
             // Mismatching input types or using more than one of these is not allowed
             current = ToolInputType::Mixed;
             return;

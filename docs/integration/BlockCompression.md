@@ -36,17 +36,26 @@ In the code snippet above, note that some parameters like `bcFormat` are hardcod
 
 ## BC7 Acceleration
 
-BC6 and BC7 are different from all other BC formats because they support multiple encoding modes and partitioning schemes in each block. LibNTC implements an acceleration scheme for BC7 that relies on analyzing the texture during NTC compression and storing some hints for transcoding into BCn later.
+BC6 and BC7 are different from all other BC formats because they support multiple encoding modes and partitioning schemes in each block. LibNTC implements an acceleration scheme for BC7 that relies on analyzing the texture during NTC compression and storing additional data for quick transcoding into BC7 later. The additional data is just the optimal mode and partition indices for each block in the BC7 texture, encoded at 9 bits per block, stored in a buffer, and compressed with GDeflate for optimal disk space utilization.
 
 The ahead-of-time analysis process consists of the following steps:
 
-1. Run a "slow" compression pass that produces the acceleration data, by calling `IContext::MakeBlockCompressionComputePass(...)` with `writeAccelerationData = true`. This version of the compression pass needs an extra output buffer of at least `ntc::BlockCompressionAccelerationBufferSize` bytes.
-2. Read the contents of the acceleration buffer after executing the compression pass and pass them to `ITextureMetadata::SetBlockCompressionAccelerationData(...)`.
-3. Subsequent calls to `MakeBlockCompressionComputePass` with the `texture` parameter specified can use the previously defined acceleration data and will be faster or slower, depending on the `quality` parameter. 
-4. Search through the `quality` parameter space to determine the optimal setting for the texture, depending on a desired PSNR value or processing time. The quality generally increases with higher `quality` values, so a binary search algorithm can be used.
-5. Store the desired `quality` value in the texture metadata using the `ITextureMetadata::SetBlockCompressionQuality(...)` method. Both the acceleration data and the quality value will be stored in the NTC file when the texture set is serialized.
+1. Run a "slow" compression pass by calling `IContext::MakeBlockCompressionComputePass(...)` and executing that compute pass.
+2. Read the contents of the encoded texture and pass them to `ITextureMetadata::MakeAndStoreBC7ModeBuffer(...)`.
+3. Repeat for all relevant mip levels of all BC7 textures in the texture set.
+4. Save the NTC file.
 
-BC7 acceleration is implemented in the NTC command-line tool and is available through the `--optimizeBC` action. The quality loss can be controlled with the `--bcPsnrThreshold <decibels>` parameter.
+BC7 optimization is implemented in the NTC command-line tool and is available through the `--optimizeBC` action. Note that this optimization pass can be ran on already compressed NTC files, and that it requires both CUDA and a graphics API to work (`--dx12` or `--vk`).
+
+In order to use the BC7 acceleration data (the mode buffer) at transcoding time, first, it needs to be loaded from the NTC file. If the NTC file is loaded into a complete `ITextureSet` object, the data is read and decompressed automatically and is available through `ITextureMetadata::GetBC7ModeBuffer(...)`. Otherwise, if just an `ITextureSetMetadata` object is available, the application is responsible for reading the data from disk and optionally decompressing it. There are several API functions for that:
+
+- `ITextureMetadata::GetBC7ModeBufferFootprint(int mipLevel)` returns the description of the mode buffer and how it is stored in the file. The data in the file can be either uncompressed, in which case you just need to read it into a GPU buffer, or compressed with GDeflate, in which case it needs to be decompressed before use.
+- `IContext::DecompressBuffer(...)` performs decompression on the CPU.
+- `IContext::DecompressGDeflateOnVulkanGPU(...)` performs decompression on the GPU using the `VK_NV_memory_decompression` extension.
+
+For information about GDeflate decompression, please refer to the decompression section of the [Inference on Load guide](InferenceOnLoad.md#decompressing-the-gdeflate-compressed-latent-data).
+
+Once the uncompressed mode buffer is available in the GPU memory, it can be used in the BC7 encoding pass by setting the relevant members of `MakeBlockCompressionComputePassParameters`: `modeBufferSource`, `modeBufferByteOffset` etc. The results of BC7 encoding of a texture without a mode buffer and with a mode buffer derived from the same texture should match exactly, whereas the performance difference should be approximately 20-30x. Note that the `BCTest` app, included with the NTC SDK, performs validation of these claims when used with `--format bc7 --accelerated`.
 
 ## Image Comparison
 

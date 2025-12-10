@@ -1,4 +1,4 @@
-# RTX Neural Texture Compression (NTC) SDK v0.8.0 BETA
+# RTX Neural Texture Compression (NTC) SDK v0.9.0 BETA
 
 [Quick Start Guide](#quick-start-guide)
 
@@ -114,9 +114,10 @@ For a list of software components needed to build the SDK, please refer to the [
 
 ## Known Issues
 
-The following issues are observed with NVIDIA Display Driver 590.26:
-
-- Cooperative Vector inference (both on-load and on-sample) using INT8 math is slower than expected on DX12 (bug 5341486)
+- GDeflate decompression with `VK_NV_memory_decompression` with the NVIDIA 590.26 Developer Preview driver crashes the GPU unless Nsight Aftermath is enabled.
+- Running NTC SDK apps in D3D12 mode on non-Developer Preview NVIDIA drivers may result in messages like `ERROR: D3D12CreateDevice failed, error code = 0x80070057`. To work around that, add `--no-coopVec`.
+- CoopVec FP8 inference produces incorrect results on Intel Arc B-series GPUs with the latest driver (101.8331).
+- Inference on Feedback mode in the Rendering sample is broken on AMD GPUs.
 
 ## Build Guide
 

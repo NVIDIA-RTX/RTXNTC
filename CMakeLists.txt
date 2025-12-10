@@ -18,6 +18,7 @@ option(NTC_WITH_TESTS "Build testing executables" ON)
 option(NTC_WITH_NVTT3 "Include NVTT3 library support for BCTest" OFF)
 set(NVTT3_SEARCH_PATH "" CACHE PATH "Custom search path for NVTT3")
 option(NTC_WITH_RENDERER "Include the Renderer sample" ON)
+option(NTC_DEBUG_SHADERS "Compile NTC shaders with debug information" OFF)
 
 option(DONUT_WITH_LZ4 "" OFF)
 option(DONUT_WITH_MINIZ "" OFF)
@@ -30,6 +31,11 @@ endif()
 option(DONUT_WITH_VULKAN "" ON)
 option(DONUT_WITH_STATIC_SHADERS "" ON)
 option(DONUT_WITH_DLSS "" ${NTC_WITH_RENDERER})
+
+# Forward the shader debug option to Donut to make sure that framework shaders like forward_vs also include debug info
+if (NTC_DEBUG_SHADERS)
+    option(DONUT_EMBED_SHADER_PDBS "" ON)
+endif()
 
 # Register our path for CMake modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/support/cmake")
@@ -114,6 +120,20 @@ if (DONUT_WITH_DX12)
     set(DONUT_D3D_AGILITY_SDK_FETCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/dx12-agility-sdk" CACHE STRING "" FORCE)
     include("${CMAKE_CURRENT_SOURCE_DIR}/external/donut/cmake/FetchAgilitySDK.cmake")
     include(ConfigureAgilitySDK)
+
+    set(DIRECTSTORAGE_SDK_URL "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.DirectStorage/1.3.0")
+    set(DIRECTSTORAGE_SDK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/external/DirectStorage")
+    message(STATUS "Downloading DirectStorage SDK from ${DIRECTSTORAGE_SDK_URL} into ${DIRECTSTORAGE_SDK_PATH}")
+    FetchContent_Declare(DirectStorageSDK 
+        URL "${DIRECTSTORAGE_SDK_URL}"
+        SOURCE_DIR "${DIRECTSTORAGE_SDK_PATH}"
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(DirectStorageSDK)
+
+    file(COPY 
+        "${DIRECTSTORAGE_SDK_PATH}/native/bin/x64/dstorage.dll" 
+        "${DIRECTSTORAGE_SDK_PATH}/native/bin/x64/dstoragecore.dll"
+        DESTINATION "${NTC_BINARY_DIR}")
 endif()
 
 add_subdirectory(libraries/ntc-utils)
@@ -123,8 +143,9 @@ if (NTC_WITH_RENDERER)
     add_subdirectory(samples/renderer)
 endif()
 
-if (NTC_WITH_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/support/tests/bctest/CMakeLists.txt")
+if (NTC_WITH_TESTS)
     add_subdirectory(support/tests/bctest)
+    add_subdirectory(support/tests/imagediff)
 endif()
 
 # Set the default startup project for VS
@@ -146,3 +167,7 @@ set_target_properties(ntc-explorer-shaders          PROPERTIES FOLDER "NTC SDK/T
 if (TARGET bctest)
     set_target_properties(bctest                    PROPERTIES FOLDER "NTC SDK/Tests")
 endif()
+if (TARGET imagediff)
+    set_target_properties(imagediff                 PROPERTIES FOLDER "NTC SDK/Tests")
+endif()
+set_target_properties(libdeflate                    PROPERTIES FOLDER "Third-Party Libraries")

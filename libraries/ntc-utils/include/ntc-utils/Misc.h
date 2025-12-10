@@ -17,3 +17,8 @@
 ntc::VersionInfo GetNtcSdkVersion();
 
 void GetNvidiaSansFont(void const** pOutData, size_t* pOutSize);
+
+#ifdef _MSC_VER // MSVC doesn't have strcasecmp
+#define strncasecmp _strnicmp
+#define strcasecmp _stricmp
+#endif

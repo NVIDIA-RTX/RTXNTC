@@ -44,6 +44,7 @@ target_include_directories(ntc-utils PUBLIC include)
 
 target_sources(ntc-utils PRIVATE
     include/ntc-utils/DDSHeader.h
+    include/ntc-utils/BufferLoading.h
     include/ntc-utils/DeviceUtils.h
     include/ntc-utils/GraphicsBlockCompressionPass.h
     include/ntc-utils/GraphicsDecompressionPass.h
@@ -51,6 +52,7 @@ target_sources(ntc-utils PRIVATE
     include/ntc-utils/Manifest.h
     include/ntc-utils/Misc.h
     include/ntc-utils/Semantics.h
+    src/BufferLoading.cpp
     src/DeviceUtils.cpp
     src/GraphicsBlockCompressionPass.cpp
     src/GraphicsDecompressionPass.cpp
@@ -69,4 +71,8 @@ target_compile_definitions(ntc-utils PUBLIC
 if (WIN32)
     target_compile_definitions(ntc-utils PRIVATE
         DONUT_D3D_AGILITY_SDK_VERSION=${DONUT_D3D_AGILITY_SDK_VERSION})
+endif()
+if (DONUT_WITH_DX12)
+    target_include_directories(ntc-utils PUBLIC "${DIRECTSTORAGE_SDK_PATH}/native/include")
+    target_link_libraries(ntc-utils PUBLIC "${DIRECTSTORAGE_SDK_PATH}/native/lib/x64/dstorage.lib")
 endif()

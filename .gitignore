@@ -7,3 +7,4 @@
 *.pyc
 /assets/testscratch
 /external/dx12-agility-sdk
+/external/DirectStorage

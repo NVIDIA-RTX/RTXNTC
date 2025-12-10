@@ -106,6 +106,12 @@ add_custom_target(ntc-renderer-shaders
 
 set_source_files_properties(${shader_sources} PROPERTIES VS_TOOL_OVERRIDE "None") 
 
+if (NTC_DEBUG_SHADERS)
+    set(debug_option "--embedPDB")
+else()
+    set(debug_option "")
+endif()
+
 donut_compile_shaders_all_platforms(
     TARGET ntc-renderer-shaders
     PROJECT_NAME "NTC Renderer"
@@ -115,7 +121,7 @@ donut_compile_shaders_all_platforms(
     OUTPUT_FORMAT HEADER
     OUTPUT_BASE ${shader_output_dir}
     INCLUDES ${libntc_include_directory} ${libstf_include_directory}
-    SHADERMAKE_OPTIONS "--hlsl2021"
+    SHADERMAKE_OPTIONS "--hlsl2021 ${debug_option}"
     SHADERMAKE_OPTIONS_DXIL "--shaderModel 6_5"
     SHADERMAKE_OPTIONS_SPIRV "--vulkanVersion 1.2"
 )
@@ -130,7 +136,7 @@ donut_compile_shaders(
     DXIL ${shader_output_dir}
     INCLUDES ${libntc_include_directory} ${libstf_include_directory}
     SHADER_MODEL 6_9
-    SHADERMAKE_OPTIONS_DXIL "--embedPDB"
+    SHADERMAKE_OPTIONS "${debug_option}"
 )
 
 donut_compile_shaders(
@@ -142,6 +148,7 @@ donut_compile_shaders(
     OUTPUT_FORMAT HEADER
     SPIRV_SLANG ${shader_output_dir}
     INCLUDES ${libntc_include_directory} ${libstf_include_directory}
+    SHADERMAKE_OPTIONS "${debug_option}"
     SHADERMAKE_OPTIONS_SPIRV "-X \"-capability spvCooperativeVectorNV\""
 )
 

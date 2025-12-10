@@ -47,6 +47,12 @@ def get_default_tool_path():
     filename = 'bin/windows-x64/ntc-cli.exe' if os.name == 'nt' else 'bin/linux-x64/ntc-cli'
     return os.path.join(sdkroot, filename)
 
+def get_default_imagediff_path():
+    "Returns the path to the imagediff tool, assuming the original SDK directory structure."
+    sdkroot = get_sdk_root_path()
+    filename = 'bin/windows-x64/imagediff.exe' if os.name == 'nt' else 'bin/linux-x64/imagediff'
+    return os.path.join(sdkroot, filename)
+
 @dataclass
 class LatentShape:
     gridSizeScale: int
@@ -64,6 +70,9 @@ class Arguments:
 
     # Extra arguments for ntc-cli, passed verbatim
     customArguments: str = ''
+
+    # Content of the manifest to be passed via STDIN, if any
+    stdin: Optional[str] = None
     
     # Graphics API, can be 'dx12' or 'vk'
     graphicsApi: str = ''
@@ -76,7 +85,6 @@ class Arguments:
     bcFormat: str = ''
     bcPsnrThreshold: Optional[float] = None
     bcPsnrOffset: Optional[float] = None
-    bcQuality: Optional[int] = None
     benchmark: Optional[int] = None
     bitsPerPixel: Optional[float] = None
     compress: bool = False
@@ -84,10 +92,14 @@ class Arguments:
     debug: bool = False
     decompress: bool = False
     describe: bool = False
-    dimensions: str = None
+    dimensions: str = ''
     discardMaskedOutPixels: bool = False
     experimentalKnob: Optional[float] = None
     generateMips: bool = False
+    gdeflate: str = ''
+    gdeflateLevel: Optional[int] = None
+    gdeflateThreshold: Optional[float] = None
+    gpuGDeflate: bool = False
     gridLearningRate: Optional[float] = None
     imageFormat: str = ''
     kPixelsPerBatch: Optional[int] = None
@@ -105,8 +117,10 @@ class Arguments:
     networkLearningRate: Optional[float] = None
     optimizeBC: bool = False
     randomSeed: Optional[int] = None
+    readManifestFromStdin: bool = False
     saveCompressed: str = ''
     saveImages: str = ''
+    saveManifest: str = ''
     saveMips: bool = False
     stableTraining: bool = False
     stepsPerIteration: Optional[int] = None
@@ -120,6 +134,8 @@ class Arguments:
         for name, value in self.__dict__.items():
             # Process the special case fields
             if name == 'tool':
+                pass
+            elif name == 'stdin':
                 pass
             elif name == 'customArguments':
                 if value is not None: result += value.split(' ')
@@ -171,7 +187,7 @@ class Result:
     savedFileBpp: Optional[float] = None
     gpuName: str = ''
     graphicsApi: str = ''
-    gpuFeatures: Optional[List[str]] = None # may contain 'CoopVec'
+    gpuFeatures: Optional[List[str]] = None # may contain 'CoopVec', 'GDeflate'
 
     # describe command output:
     dimensions: Optional[Tuple[int, int]] = None # (width, height)
@@ -222,7 +238,8 @@ _latentShapeRegex = Regex(r'Latent shape: --gridSizeScale (?P<gss>\d+) --numFeat
 _mipRegex = Regex(r'MIP\s+(?P<mipLevel>\d+)\s+PSNR: (?P<psnr>[0-9\.]+|inf) dB')
 _overallPsnrRegex = Regex(r'Overall PSNR \((?P<type>\w+) weights\): (?P<psnr>[0-9\.]+|inf) dB')
 _stepRegex = Regex(r'Training: (?P<steps>\d+) steps, (?P<milliseconds>[0-9\.]+) ms/step, intermediate PSNR: (?P<psnr>[0-9\.]+|inf) dB')
-_systemRegex = Regex(r'Using (?P<gpu>.+) with (?P<api>.+) API\. CoopVec \[(?P<coopVec>[YN])\]')
+_systemRegex = Regex(r'Using (?P<gpu>.+) with (?P<api>.+) API\. CoopVec \[(?P<coopVec>[YN])\], GDeflate \[(?P<gdeflate>[YN])\]')
+_imageDiffRegex = Regex(r'PAIR (?P<pair>\d+) MIP\s+(?P<mipLevel>\d+): MSE = (?P<mse>[0-9\.]+|inf), PSNR = (?P<psnr>[0-9\.]+|inf) dB')
 
 
 def run(args: Arguments) -> Result:
@@ -231,7 +248,7 @@ def run(args: Arguments) -> Result:
     command = args.get_command_line()
 
     taskStartTime = time.time()
-    output = subprocess.run(command, capture_output=True, text=True)
+    output = subprocess.run(command, input=args.stdin, capture_output=True, text=True)
     taskEndTime = time.time()
 
     if output.returncode != 0:
@@ -297,6 +314,7 @@ def run(args: Arguments) -> Result:
             result.graphicsApi = m.api
             result.gpuFeatures = []
             if m.coopVec == 'Y': result.gpuFeatures.append('CoopVec')
+            if m.gdeflate == 'Y': result.gpuFeatures.append('GDeflate')
         
     if compressionRun.learningCurve:
         result.compressionRuns = _create_or_append_list(result.compressionRuns, compressionRun)
@@ -405,3 +423,26 @@ def process_concurrent_tasks(tasks: List[Any], devices: List[int], ready: Callab
         signal.signal(signal.SIGINT, old_handler)
 
     return terminate
+
+def run_imagediff(tool: str, files: List[str], extraArgs: List[str] = []):
+    """
+    Runs the ImageDiff tool on the two specified image files and returns the parsed result
+    as a list of (PAIR, MIP, MSE, PSNR) tuples, one tuple per MIP level.
+    
+    In this list, PAIR is a 0-based index of the image pair.
+    Files 0 and 1 are pair 0, files 2 and 3 are pair 1, and so on.
+    """
+
+    command = [tool] + files + extraArgs
+
+    output = subprocess.run(command, capture_output=True, text=True)
+
+    if output.returncode != 0:
+        raise RuntimeError(command, output.returncode, output.stdout, output.stderr)
+    
+    results = []
+    for line in output.stdout.splitlines():
+        if m := _imageDiffRegex.parse(line):
+            results.append((int(m.pair), int(m.mipLevel), float(m.mse), float(m.psnr)))
+
+    return results

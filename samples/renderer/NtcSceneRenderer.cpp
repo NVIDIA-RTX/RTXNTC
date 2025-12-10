@@ -67,6 +67,7 @@ struct
     bool inferenceOnSample = true;
     bool inferenceOnFeedback = true;
     bool enableCoopVec = true;
+    bool enableGpuDeflate = false;
     bool enableDLSS = true;
     int adapterIndex = -1;
 } g_options;
@@ -88,6 +89,7 @@ bool ProcessCommandLine(int argc, const char** argv)
         OPT_BOOLEAN(0, "inferenceOnSample", &g_options.inferenceOnSample, "Enable inference on sample (default on, use --no-inferenceOnSample)"),
         OPT_BOOLEAN(0, "inferenceOnFeedback", &g_options.inferenceOnFeedback, "Enable inference on feedback (default on, use --no-inferenceOnFeedback)"),
         OPT_BOOLEAN(0, "coopVec", &g_options.enableCoopVec, "Enable CoopVec extensions (default on, use --no-coopVec)"),
+        OPT_BOOLEAN(0, "gpuGDeflate", &g_options.enableGpuDeflate, "Enable GPU-based GDeflate decompression"),
         OPT_BOOLEAN(0, "dlss", &g_options.enableDLSS, "Enable DLSS (default on, use --no-dlss)"),
         OPT_INTEGER(0, "adapter", &g_options.adapterIndex, "Index of the graphics adapter to use (use ntc-cli.exe --dx12|vk --listAdapters to find out)"),
         OPT_STRING(0, "materialDir", &g_options.materialDir, "Subdirectory near the scene file where NTC materials are located"),
@@ -311,7 +313,7 @@ public:
     if (g_options.enableDLSS)
     {
         m_DLSS = render::DLSS::Create(GetDevice(), *m_shaderFactory, app::GetDirectoryWithExecutable().generic_string());
-        if (m_DLSS->IsSupported())
+        if (m_DLSS->IsDlssSupported())
             m_aaMode = AntiAliasingMode::DLSS;
     }
 #endif
@@ -527,7 +529,8 @@ public:
     
     bool Init()
     {
-        if (!m_materialLoader->Init(g_options.enableCoopVec, m_commonPasses->m_BlackTexture))
+        if (!m_materialLoader->Init(g_options.enableCoopVec, g_options.enableGpuDeflate, g_options.debug,
+            m_commonPasses->m_BlackTexture))
             return false;
 
         if (!ImGui_Renderer::Init(m_shaderFactory))
@@ -986,8 +989,14 @@ public:
         {
             if (m_DLSS)
             {
-                m_DLSS->SetRenderSize(fbinfo.width, fbinfo.height, fbinfo.width, fbinfo.height);
-                if (!m_DLSS->IsAvailable())
+                donut::render::DLSS::InitParameters dlssParams;
+                dlssParams.inputWidth = fbinfo.width;
+                dlssParams.inputHeight = fbinfo.height;
+                dlssParams.outputWidth = fbinfo.width;
+                dlssParams.outputHeight = fbinfo.height;
+                m_DLSS->Init(dlssParams);
+                
+                if (!m_DLSS->IsDlssInitialized())
                     m_aaMode = AntiAliasingMode::TAA;
             }
             else
@@ -1343,7 +1352,7 @@ int main(int __argc, const char** __argv)
     deviceParams.enablePerMonitorDPI = true;
     deviceParams.supportExplicitDisplayScaling = true;
 
-    SetNtcGraphicsDeviceParameters(deviceParams, graphicsApi, false, g_ApplicationName);
+    SetNtcGraphicsDeviceParameters(deviceParams, graphicsApi, false, g_options.enableCoopVec, g_ApplicationName);
 #if DONUT_WITH_DLSS && NTC_WITH_VULKAN
     if (graphicsApi == nvrhi::GraphicsAPI::VULKAN)
     {

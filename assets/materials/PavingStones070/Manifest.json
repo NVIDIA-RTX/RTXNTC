@@ -4,7 +4,7 @@
       "fileName": "AmbientOcclusion.jpg",
       "name": "AmbientOcclusion",
       "isSRGB": false,
-      "bcFormat": "BC4",
+      "bcFormat": "BC1",
       "semantics": {
         "Occlusion": "R"
       }
@@ -29,7 +29,7 @@
     },
     {
       "fileName": "NormalDX.jpg",
-      "name": "Normal",
+      "name": "NormalDX",
       "isSRGB": false,
       "bcFormat": "BC7",
       "semantics": {

@@ -172,7 +172,10 @@ def add_texture_to_manifest(material, manifest: ManifestState, texture: TextureP
     
     print(f'  {texture.name}: {get_file_basename(imageUri)}')
     
-    imagePathRelativeToManifest = os.path.relpath(imageUri, manifestDir)
+    if manifestDir is not None:
+        imagePathRelativeToManifest = os.path.relpath(imageUri, manifestDir)
+    else:
+        imagePathRelativeToManifest = os.path.abspath(imageUri)
 
     if texture.name == 'Occlusion':
         # Try to merge the occlusion texture slice with a previously created roughness-metalness slice
@@ -300,7 +303,8 @@ def process_gltf_file(inputFileName):
         # Add all supported textures that are present in the material to the manifest.
         for texture in textureTypes:
             add_texture_to_manifest(material, manifest, texture, texturesNode,
-                                    imagesNode, len(imagesNode), gltfDir, manifestDir = args.output)
+                                    imagesNode, len(imagesNode), gltfDir,
+                                    manifestDir = args.output if args.keepManifests else None)
 
         if len(manifest.textures) == 0:
             print(f'No textures, skipping.')
@@ -370,15 +374,20 @@ for materialIndex in range(len(materialDefinitions)):
     if matdef.references is None:
         deduplicate_material_name(matdef)
 
-        matdef.manifestFileName = os.path.join(args.output, f'{matdef.materialName}.manifest.json')
         matdef.ntcFileName = os.path.join(args.output, f'{matdef.materialName}.ntc')
         ntcFileName = matdef.ntcFileName
 
-        with open(matdef.manifestFileName, 'w') as manifestFile:
-            # Package the textures into a full manifest
-            manifest = { 'textures': matdef.manifestTextures }
-            # Save the JSON file
-            json.dump(manifest, manifestFile, indent=2)
+        # Package the textures into a full manifest
+        manifest = { 'textures': matdef.manifestTextures }
+        if args.keepManifests:
+            manifestString = None
+            matdef.manifestFileName = os.path.join(args.output, f'{matdef.materialName}.manifest.json')
+            with open(matdef.manifestFileName, 'w') as manifestFile:
+                # Save the JSON file
+                json.dump(manifest, manifestFile, indent=2)
+        else:
+            # Pass the manifest via STDIN
+            manifestString = json.dumps(manifest)
 
         if args.skipExisting and os.path.exists(matdef.ntcFileName):
             print(f'Output file {matdef.ntcFileName} exists, skipping.')
@@ -392,6 +401,8 @@ for materialIndex in range(len(materialDefinitions)):
             generateMips=True,
             graphicsApi='vk',
             loadManifest=matdef.manifestFileName,
+            readManifestFromStdin=(manifestString is not None),
+            stdin=manifestString,
             maxBitsPerPixel=args.maxBitsPerPixel,
             optimizeBC=True,
             saveCompressed=matdef.ntcFileName,
@@ -552,11 +563,6 @@ if len(tasks) == 0:
 maxNtcFilePathLen = max([len(args.saveCompressed) for args in tasks])
 
 def task_ready(task, result, originalTaskCount, tasksCompleted):
-
-    # Delete the manifest file unless instructed to keep it.
-    if not args.keepManifests:
-        os.unlink(task.loadManifest)
-
     # Print the status output
     bpp = f'{result.bitsPerPixel:.2f}' if result.bitsPerPixel else 'N/A'
     psnr = f'{result.overallPsnr:.2f}' if result.overallPsnr else 'N/A'

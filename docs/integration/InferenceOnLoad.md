@@ -2,6 +2,10 @@
 
 LibNTC provides the means to decompress neural texture sets using either DX12 or Vulkan. The library itself doesn't submit any GPU commands or create any GPU resources; instead, it provides description of how to execute the decompression pass on the application side.
 
+The overall data pipeline for decompression and inference on sample is shown on the following diagram. Note that the diagram shows the data flow for both Inference on Load and Inference on Sample, which only differ in the usage of the decoded NTC pixels: On Load transcodes pixels to BCn, while On Sample uses them directly for shading.
+
+![NTC Data Pipeline](../images/decompression-pipeline.png)
+
 To use graphics API functions, first you need to make sure that the context is created with the right graphics API and device object provided, see the [Context](Context.md) section of this guide. The graphics device is currently only used for host-only functions by the library.
 
 To decompress a neural texture set, first create an `ITextureSetMetadata` object from it:
@@ -41,6 +45,8 @@ The `ComputePassDesc` returned by `MakeDecompressionComputePass` contains the fo
 
 It is the application's responsibility to create the compute pipeline, constant buffer, weight buffer (see below), and fill the buffers with the provided data. The application must also populate the descriptor table (DX12) or descriptor sets (Vk) to bind these resources to the right slots of the compute shader. The bindings are static and described in the comments to `IContext::MakeDecompressionComputePass` in [ntc.h](/libraries/RTXNTC-Library/include/libntc/ntc.h). The actual code needed to perform these operations depends on the graphics API and the abstraction layer (RHI) used by the application. The SDK apps are using [NVRHI](https://github.com/NVIDIAGameWorks/nvrhi), and the implementation of the decompression pass with NVRHI can be found in [GraphicsDecompressionPass.cpp](/libraries/ntc-utils/src/GraphicsDecompressionPass.cpp). 
 
+## Latent texture array
+
 The most important resources for the decompression pass are provided implicitly: it's the latents texture which contains most of the NTC texture set file, and the weight buffer that contains the inference weights. The latents data need to be uploaded into a GPU texture and bound to the decompression pipeline as a `Texture2DArray`. The exact means of reading the file, uploading it to the GPU, and managing live files in GPU memory are left up to the application.
 
 To initialize the texture, first obtain the descriptor of the texture from `ITextureSetMetadata`, and then create the texture object:
@@ -58,32 +64,63 @@ ntc::LatentTextureDesc const latentTextureDescSrc = textureSetMetadata->GetLaten
 After creating the texture, upload the latent data into it by reading the data from the NTC file using footprint information provided by `ITextureSetMetadata::GetLatentTextureFootprint(...)`:
 
 ```c++
-std::vector<uint8_t> latentData;
 for (int mipLevel = 0; mipLevel < latentTextureDescSrc.mipLevels; ++mipLevel)
 {
-    ntc::LatentTextureFootprint footprint;
-    ntc::Status ntcStatus = textureSetMetadata->GetLatentTextureFootprint(mipLevel, footprint);
-    if (ntcStatus != ntc::Status::Ok)
-        // Handle the error.
-
-    latentData.resize(footprint.range.size);
-
-    ntcFile->Seek(footprint.range.offset);
-    if (!ntcFile->Read(latentData.data(), latentData.size()))
-        // Handle the error.
-    
-    uint8_t const* srcData = latentData.data();
-
     for (int layerIndex = 0; layerIndex < latentTextureDescSrc.arraySize; ++layerIndex)
     {
+        ntc::LatentTextureFootprint footprint;
+        ntc::Status ntcStatus = textureSetMetadata->GetLatentTextureFootprint(mipLevel, layerIndex, footprint);
+        if (ntcStatus != ntc::Status::Ok)
+            // Handle the error.
+        
+        std::vector<uint8_t> latentData;
+        latentData.resize(footprint.buffer.rangeInStream.size);
+
+        if (!ntcFile->Seek(footprint.buffer.rangeInStream.offset) ||
+            !ntcFile->Read(latentData.data(), latentData.size()))
+            // Handle the error.
+        
+        // If the latent data is compressed, decompress it first.
+        if (footprint.buffer.compressionType != ntc::CompressionType::None)
+        {
+            srd::vector<uint8_t> decompressedData;
+            decompressedData.resize(footprint.buffer.uncompressedSize);
+
+            ntcStatus = ntcContext->DecompressBuffer(
+                footprint.buffer.compressionType,
+                latentData.data(), latentData.size(),
+                decompressedData.data(), decompressedData.size(),
+                footprint.buffer.uncompressedCrc32);
+
+            if (ntcStatus != ntc::Status::Ok)
+                // Handle the error.
+
+            latentData = std::move(decompressedData);
+        }
+    
         // ... Upload the data from 'latentData' into the texture at 'mipLevel' and 'layerIndex',
         // with 'footprint.rowPitch' bytes in each row - API/engine dependent ...
-
-        // Move on to the next array layer
-        srcData += footprint.slicePitch;
     }
 }
 ```
+
+## Decompressing the GDeflate-compressed latent data
+
+The latent data stored in NTC files may use additional lossless compression for some mip levels and array layers. The example above shows decompression performed on the CPU, which is the simplest way of doing it, but not the fastest one. Currently, only GDeflate compression is supported for buffers, and it can be efficiently decompressed on the GPU using one of the following ways:
+
+1. Using Vulkan [`VK_NV_memory_decompression`](https://docs.vulkan.org/refpages/latest/refpages/source/VK_NV_memory_decompression.html) extension. LibNTC provides the `IContext::DecompressGDeflateOnVulkanGPU(...)` function that implements decompression on the GPU using this extension. Data uploads and memory management must be implemented by the application.
+
+2. Using [DirectStorage](https://github.com/microsoft/DirectStorage). This approach also needs to be implemented on the application side, including the DirectStorage API calls. The compressed buffers provided by LibNTC can be directly consumed by DirectStorage queues using the `DSTORAGE_COMPRESSION_FORMAT_GDEFLATE` format.
+
+3. Using custom decompression shaders based on the [GDeflate reference implementation](https://github.com/microsoft/DirectStorage/tree/main/GDeflate/shaders).
+
+The first two approaches, plus CPU decompression using `IContext::DecompressBuffer(...)`, are implemented in the `ntc-utils` library provided with the NTC SDK. See [`BufferLoading.cpp`](/libraries/ntc-utils/src/BufferLoading.cpp) for the implementation details. The diagram below illustrates the decompression options implemented in that file.
+
+![GDeflate Pipelines](../images/gdeflate-options.png)
+
+Also note that GDeflate compression for latents is optional and is controlled by `ITextureSet::ConfigureLosslessCompression(...)`. Using that function, or the `--gdeflate <option>` argument to `ntc-cli`, you can produce NTC files that only use GDeflate for the BC7 mode buffers, for example, or not use it at all to make the loading process simpler.
+
+## Weight buffer
 
 The data for the weight buffer should be queried from the texture set and depends on the inference math version being used. For automatic selection of the weight version, use the `ITextureSetMetadata::GetBestSupportedWeightType(...)` function as shown above. Note that it might return `Unknown` in a rare but possible case when the texture set does not provide any Int8 data but the GPU does not support CoopVec-FP8 inference.
 

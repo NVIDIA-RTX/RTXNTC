@@ -57,6 +57,10 @@ Inference on Sample needs four inputs, obtained through different ways:
 
 The code for uploading these buffers depends on the engine and its graphics API abstraction layer. For an example using NVRHI, see [NtcMaterialLoader.cpp](/samples/renderer/NtcMaterialLoader.cpp) in the Renderer sample.
 
+The following diagram illustrates the data loading pipeline that is used for Inference on Load and Inference on Sample:
+
+![NTC Data Pipeline](../images/decompression-pipeline.png)
+
 ### 3. Running inference in the shader
 
 The shader functions necessary to perform Inference on Sample are provided with LibNTC, in the [`libntc/shaders/Inference.hlsli`](/libraries/RTXNTC-Library/include/libntc/shaders/Inference.hlsli) and [`libntc/shaders/InferenceCoopVec.hlsli`](/libraries/RTXNTC-Library/include/libntc/shaders/InferenceCoopVec.hlsli) files. These headers are compatible with the latest DXC and Slang compilers.

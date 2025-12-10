@@ -28,19 +28,42 @@ destDir = os.path.join(sdkroot, 'assets/testfiles')
 
 tasks = []
 
-ntcFileName = os.path.join(destDir, f'PavingStones070_5bpp.ntc')
+ntcFileName = os.path.join(destDir, 'PavingStones070_5bpp.ntc')
+ddsDir = os.path.join(destDir, 'PavingStones070_5bpp_DDS')
 
 task = ntc.Arguments(
     tool=ntc.get_default_tool_path(),
-    loadImages=sourceDir,
+    loadManifest=os.path.join(sourceDir, 'Manifest.json'),
+    generateMips=True,
     compress=True,
+    decompress=True,
     bitsPerPixel=5.0,
-    saveCompressed=ntcFileName
+    optimizeBC=True,
+    graphicsApi='vk',
+    saveCompressed=ntcFileName,
 )
 
 tasks.append(task)
 
-def ready(task: ntc.Arguments, result: ntc.Result, originalTaskCount: int, tasksCompleted: int):
+def ready1(task: ntc.Arguments, result: ntc.Result, originalTaskCount: int, tasksCompleted: int):
     print(f'{task.saveCompressed}: OK')
 
-ntc.process_concurrent_tasks(tasks, args.devices, ready)
+ntc.process_concurrent_tasks(tasks, args.devices, ready1)
+
+
+task = ntc.Arguments(
+    tool=ntc.get_default_tool_path(),
+    loadCompressed=ntcFileName,
+    decompress=True,
+    noCoopVec=True,
+    graphicsApi='vk',
+    saveImages=ddsDir,
+    saveMips=True
+)
+
+tasks = [task]
+
+def ready2(task: ntc.Arguments, result: ntc.Result, originalTaskCount: int, tasksCompleted: int):
+    print(f'{task.saveImages}: OK')
+
+ntc.process_concurrent_tasks(tasks, args.devices, ready2)

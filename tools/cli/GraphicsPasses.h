@@ -34,11 +34,10 @@ struct GraphicsResourcesForTexture
 struct GraphicsResourcesForTextureSet
 {
     std::vector<GraphicsResourcesForTexture> perTexture;
-    nvrhi::BufferHandle accelerationBuffer;
-    nvrhi::BufferHandle accelerationStagingBuffer;
 };
 
 class GraphicsDecompressionPass;
+struct GDeflateFeatures;
 
 bool CreateGraphicsResourcesFromMetadata(
     ntc::IContext* context,
@@ -49,9 +48,11 @@ bool CreateGraphicsResourcesFromMetadata(
     GraphicsResourcesForTextureSet& resources);
 
 bool DecompressTextureSetWithGraphicsAPI(
+    nvrhi::IDevice* device,
     nvrhi::ICommandList* commandList,
     nvrhi::ITimerQuery* timerQuery,
     GraphicsDecompressionPass& gdp,
+    GDeflateFeatures* gdeflateFeatures,
     ntc::IContext* context,
     ntc::ITextureSetMetadata* metadata,
     ntc::IStream* inputFile,
@@ -77,11 +78,12 @@ bool SaveGraphicsStagingTextures(
 bool BlockCompressAndSaveGraphicsTextures(
     ntc::IContext* context,
     ntc::ITextureSetMetadata* metadata,
+    ntc::IStream* inputFile,
     nvrhi::IDevice* device,
     nvrhi::ICommandList* commandList,
     nvrhi::ITimerQuery* timerQuery,
+    GDeflateFeatures* gdeflateFeatures,
     char const* savePath,
-    int userProvidedBcQuality,
     int benchmarkIterations,
     GraphicsResourcesForTextureSet const& graphicsResources);
 

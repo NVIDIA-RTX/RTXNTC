@@ -86,8 +86,12 @@ Note that `LatentShape` doesn't specify the `gridSizeScale` parameter, as it is 
 - `rgbColorSpace`: `ColorSpace`, optional(`Linear`), color space that will be used for storing RGB components of decompressed colors
 - `alpaColorSpace`: `ColorSpace`, optional(`Linear`), color space that will be used for storing the Alpha component of decompressed colors, if applicable
 - `bcFormat`: `BlockCompressedFormat`, optional(`None`), preferred BCn compression format for transcoding this texture
-- `bcQuality`: preferred quality parameter for transcoding into BCn
-- `bcAccelerationDataView`: int, optional, index of the `BufferView` object with the BCn transcoding acceleration data
+- `bcModeBuffers`: array of `BCModeBuffer` objects describing BC7 transcoding acceleration data for mips of this texture
+
+### `BCModeBuffer` object
+
+- `mipLevel`: int, required, mip level of the texture represented by this buffer
+- `view`: int, required, index of the `BufferView` with the mode data
 
 ### `Channel` object
 
@@ -97,8 +101,7 @@ Note that `LatentShape` doesn't specify the `gridSizeScale` parameter, as it is 
 
 - `width`: int, required
 - `height`: int, required
-- `arraySize`: int, required, number of array layers in the image
-- `view`: int, required, index of the `BufferView` object with the image data
+- `layerViews`: array of int, required, indices of the `BufferView` objects with the image data, one per latent texture layer
 
 ### `ColorMip` object
 
@@ -129,5 +132,6 @@ Note that `ColorMip` supports three storage modes that are NOT mutually exclusiv
 
 - `offset`: int, required, offset of data within the NTC container data chunk
 - `storedSize`: int, required, size of data stored in the NTC container
-- `compression`: `Compression`, optional(`None`), specifies the compression algorithm used for this buffer. No algorithms are currently supported
-- `uncompressedSize`: int, optional, size of data after decompression, if applicable
+- `compression`: `Compression`, optional(`None`), specifies the compression algorithm used for this buffer. Can be `None` or `GDeflate`.
+- `uncompressedSize`: int, required when `compression` is not `None` - size of data after decompression
+- `crc32`: unsigned int, optional, CRC32 checksum of the uncompressed data

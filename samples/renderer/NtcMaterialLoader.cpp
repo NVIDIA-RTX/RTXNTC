@@ -13,6 +13,7 @@
 #include "NtcMaterialLoader.h"
 #include "NtcMaterial.h"
 #include "NtcChannelMapping.h"
+#include <ntc-utils/BufferLoading.h>
 #include <ntc-utils/GraphicsDecompressionPass.h>
 #include <ntc-utils/GraphicsBlockCompressionPass.h>
 #include <ntc-utils/DeviceUtils.h>
@@ -35,7 +36,7 @@ static const uint32_t g_maxTileStagingTextures = 6;
 // Set to nonzero for testing purposes.
 static const int g_firstLatentMipInTexture = 0;
 
-bool NtcMaterialLoader::Init(bool enableCoopVec, nvrhi::ITexture* dummyTexture)
+bool NtcMaterialLoader::Init(bool enableCoopVec, bool enableGpuDeflate, bool debug, nvrhi::ITexture* dummyTexture)
 {
     ntc::ContextParameters contextParams;
     contextParams.cudaDevice = ntc::DisableCudaDevice;
@@ -63,6 +64,11 @@ bool NtcMaterialLoader::Init(bool enableCoopVec, nvrhi::ITexture* dummyTexture)
 
     m_coopVec = m_ntcContext->IsCooperativeVectorSupported();
 
+    if (enableGpuDeflate)
+    {
+        m_gdeflateFeatures = InitGDeflate(m_device, debug);
+    }
+
     m_dummyTexture = std::make_shared<engine::LoadedTexture>();
     m_dummyTexture->texture = dummyTexture;
 
@@ -72,7 +78,7 @@ bool NtcMaterialLoader::Init(bool enableCoopVec, nvrhi::ITexture* dummyTexture)
         return false;
 
     m_graphicsBlockCompressionPass = std::make_shared<GraphicsBlockCompressionPass>(m_device,
-        /* useAccelerationBuffer = */ false, /* maxConstantBufferVersions = */ 128);
+        /* maxConstantBufferVersions = */ 128);
     if (!m_graphicsBlockCompressionPass->Init())
         return false;
 
@@ -605,10 +611,21 @@ bool NtcMaterialLoader::TranscodeTiles(const std::vector<TranscodeTileInfo>& til
                 compressionParams.srcRect.height = std::min(tileInfo.heightInTexels, mipHeight);
                 compressionParams.dstFormat = transcodeTask.bcFormat;
                 compressionParams.alphaThreshold = alphaThreshold;
-                compressionParams.texture = transcodeTask.metadata;
-                compressionParams.quality = transcodeTask.metadata
-                    ? transcodeTask.metadata->GetBlockCompressionQuality()
-                    : ntc::BlockCompressionMaxQuality;
+                nvrhi::IBuffer* modeBuffer = nullptr;
+                if (transcodeTask.bc7ModeBuffer && transcodeTask.bc7ModeBufferMipRanges[tileInfo.mip].byteSize != 0)
+                {
+                    compressionParams.modeBufferSource = ntc::BlockCompressionModeBufferSource::TextureSet;
+                    compressionParams.modeBufferByteOffset = transcodeTask.bc7ModeBufferMipRanges[tileInfo.mip].byteOffset;
+                    compressionParams.modeBufferInfo.textureSet.texture = transcodeTask.metadata;
+                    compressionParams.modeBufferInfo.textureSet.mipLevel = tileInfo.mip;
+                    compressionParams.modeMapOffsetInBlocks.x = tileInfo.xInTexels >> 2;
+                    compressionParams.modeMapOffsetInBlocks.y = tileInfo.yInTexels >> 2;
+                    modeBuffer = transcodeTask.bc7ModeBuffer;
+                }
+                else
+                {
+                    compressionParams.modeBufferSource = ntc::BlockCompressionModeBufferSource::None;
+                }
                 ntc::ComputePassDesc compressionPass;
                 ntc::Status ntcStatus = m_ntcContext->MakeBlockCompressionComputePass(compressionParams, &compressionPass);
 
@@ -624,7 +641,7 @@ bool NtcMaterialLoader::TranscodeTiles(const std::vector<TranscodeTileInfo>& til
                     : nvrhi::Format::RGBA8_UNORM;
 
                 if (!m_graphicsBlockCompressionPass->ExecuteComputePass(commandList, compressionPass,
-                    colorTexture, inputFormat, 0, blockTexture, 0, nullptr))
+                    colorTexture, inputFormat, 0, modeBuffer, blockTexture, 0))
                     return false;
             }
         }
@@ -737,7 +754,39 @@ bool NtcMaterialLoader::TranscodeTiles(const std::vector<TranscodeTileInfo>& til
     return true;
 }
 
-bool NtcMaterialLoader::TranscodeMaterial(ntc::IStream* ntcFile, ntc::ITextureSetMetadata* textureSetMetadata,
+bool NtcMaterialLoader::CreateAndLoadModeBufferForTexture(ntc::IContext* ntcContext, ntc::IStream* ntcFile,
+    ntc::ITextureSetMetadata* textureSetMetadata, TextureTranscodeTask& transcodeTask,
+    nvrhi::ICommandList* commandList, std::string const& materialTextureName)
+{
+    ntc::TextureSetDesc const& textureSetDesc = textureSetMetadata->GetDesc();
+
+    std::vector<BufferLoadingTask> modeBufferTasks;
+
+    size_t stagingBufferSize = 0;
+    size_t tempBufferSize = 0;
+    size_t finalBufferSize = 0;
+
+    FillBufferLoadingTasksForBC(textureSetDesc, transcodeTask.metadata, modeBufferTasks,
+        m_gdeflateFeatures && m_gdeflateFeatures->gpuDecompressionSupported, m_device->getGraphicsAPI(),
+        stagingBufferSize, tempBufferSize, finalBufferSize);
+    
+    if (!ExecuteBufferLoadingTasks(m_device, commandList, ntcContext, ntcFile, m_gdeflateFeatures.get(),
+        modeBufferTasks, transcodeTask.bc7ModeBuffer, stagingBufferSize, tempBufferSize, finalBufferSize))
+        return false;
+
+    transcodeTask.bc7ModeBufferMipRanges.resize(modeBufferTasks.size());
+    for (size_t mip = 0; mip < modeBufferTasks.size(); ++mip)
+    {
+        BufferLoadingTask const& mipTask = modeBufferTasks[mip];
+        if (mipTask.pipeline != BufferLoadingPipeline::None)
+            transcodeTask.bc7ModeBufferMipRanges[mip] = mipTask.finalBufferRange;
+    }
+
+    return true;
+}
+
+bool NtcMaterialLoader::TranscodeMaterial(ntc::IContext* context, ntc::IStream* ntcFile,
+    ntc::ITextureSetMetadata* textureSetMetadata,
     NtcMaterial& material, nvrhi::ICommandList* commandList, bool enableBlockCompression)
 {
     if (material.transcodeMapping.empty())
@@ -814,6 +863,13 @@ bool NtcMaterialLoader::TranscodeMaterial(ntc::IStream* ntcFile, ntc::ITextureSe
             transcodeTask.blocks = m_device->createTexture(blockTextureDesc);
             if (!transcodeTask.blocks)
                 return false;
+
+            if (transcodeTask.bcFormat == ntc::BlockCompressedFormat::BC7)
+            {
+                if (!CreateAndLoadModeBufferForTexture(context, ntcFile, textureSetMetadata, transcodeTask,
+                    commandList, materialTextureName))
+                    return false;
+            }
         }
         
         // Descriptors for all mip levels of one texture are packed together
@@ -835,13 +891,6 @@ bool NtcMaterialLoader::TranscodeMaterial(ntc::IStream* ntcFile, ntc::ITextureSe
             m_graphicsDecompressionPass->WriteDescriptor(descriptor);
         }
 
-        // Transition the texture to the UAV state because NVRHI won't do that when resources are accessed
-        // through a descriptor table. Note that there is no need to transition it back to SRV after decompression
-        // because the next operations are using regular binding sets. There is also no need for commitBarriers()
-        // because that's called by the decompression dispatch call.
-        commandList->setTextureState(transcodeTask.color, nvrhi::AllSubresources,
-            nvrhi::ResourceStates::UnorderedAccess);
-        
         // Create a LoadedTexture object to attach the texture to the material
         std::shared_ptr<engine::LoadedTexture> loadedTexture = std::make_shared<engine::LoadedTexture>();
         loadedTexture->texture = compressThisTexture ? transcodeTask.compressed : transcodeTask.color;
@@ -852,6 +901,20 @@ bool NtcMaterialLoader::TranscodeMaterial(ntc::IStream* ntcFile, ntc::ITextureSe
         
         // Bind the created texture object to the material texture slot
         material.*transcodeTask.pMaterialTexture = loadedTexture;
+    }
+
+    commandList->open();
+
+    for (int textureIndex = 0; textureIndex < textureCount; ++textureIndex)
+    {
+        TextureTranscodeTask& transcodeTask = material.transcodeMapping[textureIndex];
+
+        // Transition the texture to the UAV state because NVRHI won't do that when resources are accessed
+        // through a descriptor table. Note that there is no need to transition it back to SRV after decompression
+        // because the next operations are using regular binding sets. There is also no need for commitBarriers()
+        // because that's called by the decompression dispatch call.
+        commandList->setTextureState(transcodeTask.color, nvrhi::AllSubresources,
+            nvrhi::ResourceStates::UnorderedAccess);
     }
 
     // Submit the texture transitions performed above via setTextureState(...) to the command list.
@@ -935,10 +998,19 @@ bool NtcMaterialLoader::TranscodeMaterial(ntc::IStream* ntcFile, ntc::ITextureSe
             compressionParams.srcRect.height = mipHeight;
             compressionParams.dstFormat = transcodeTask.bcFormat;
             compressionParams.alphaThreshold = alphaThreshold;
-            compressionParams.texture = transcodeTask.metadata;
-            compressionParams.quality = transcodeTask.metadata
-                ? transcodeTask.metadata->GetBlockCompressionQuality()
-                : ntc::BlockCompressionMaxQuality;
+            nvrhi::IBuffer* modeBuffer = nullptr;
+            if (transcodeTask.bc7ModeBuffer && transcodeTask.bc7ModeBufferMipRanges[mipLevel].byteSize != 0)
+            {
+                compressionParams.modeBufferSource = ntc::BlockCompressionModeBufferSource::TextureSet;
+                compressionParams.modeBufferByteOffset = transcodeTask.bc7ModeBufferMipRanges[mipLevel].byteOffset;
+                compressionParams.modeBufferInfo.textureSet.texture = transcodeTask.metadata;
+                compressionParams.modeBufferInfo.textureSet.mipLevel = mipLevel;
+                modeBuffer = transcodeTask.bc7ModeBuffer;
+            }
+            else
+            {
+                compressionParams.modeBufferSource = ntc::BlockCompressionModeBufferSource::None;
+            }
             ntc::ComputePassDesc compressionPass;
             ntc::Status ntcStatus = m_ntcContext->MakeBlockCompressionComputePass(compressionParams, &compressionPass);
 
@@ -956,7 +1028,7 @@ bool NtcMaterialLoader::TranscodeMaterial(ntc::IStream* ntcFile, ntc::ITextureSe
             // Execute the compute pass to compress the texture.
             // Note: ExecuteComputePass is application code (not LibNTC) and it caches PSOs based on shader code pointers.
             if (!m_graphicsBlockCompressionPass->ExecuteComputePass(commandList, compressionPass,
-                transcodeTask.color, inputFormat, mipLevel, transcodeTask.blocks, 0, nullptr))
+                transcodeTask.color, inputFormat, mipLevel, modeBuffer, transcodeTask.blocks, 0))
                 return false;
             
             int const mipWidthBlocks = (mipWidth + 3) / 4;
@@ -966,6 +1038,9 @@ bool NtcMaterialLoader::TranscodeMaterial(ntc::IStream* ntcFile, ntc::ITextureSe
                 transcodeTask.blocks, nvrhi::TextureSlice().setWidth(mipWidthBlocks).setHeight(mipHeightBlocks));
         }
     }
+    
+    commandList->close();
+    m_device->executeCommandList(commandList);
 
     // Cleanup - release the intermediate textures
 
@@ -1125,44 +1200,25 @@ bool NtcMaterialLoader::PrepareMaterialForInferenceOnSample(ntc::IStream* ntcFil
         .setHeight(std::max(latentTextureDescSrc.height >> g_firstLatentMipInTexture, 1))
         .setArraySize(latentTextureDescSrc.arraySize)
         .setMipLevels(std::max(latentTextureDescSrc.mipLevels - g_firstLatentMipInTexture, 1))
-        .setInitialState(nvrhi::ResourceStates::ShaderResource)
-        .setKeepInitialState(true);
+        .setInitialState(nvrhi::ResourceStates::Common);
+        // Note: no keepInitialState! See comments in FillTextureLoadingTasksForLatents(...) for more info.
+        
     material.ntcLatentsTexture = m_device->createTexture(latentTextureDesc);
     if (!material.ntcLatentsTexture)
         return false;
 
-    std::vector<uint8_t> latentData;
-    for (int mipLevel = g_firstLatentMipInTexture; mipLevel < latentTextureDescSrc.mipLevels; ++mipLevel)
-    {
-        ntc::LatentTextureFootprint footprint;
-        ntc::Status ntcStatus = textureSetMetadata->GetLatentTextureFootprint(mipLevel, footprint);
-        if (ntcStatus != ntc::Status::Ok)
-        {
-            log::warning("Failed to get latent texture footprint for material '%s' mip %d, error code = %s: %s",
-                material.name.c_str(), mipLevel, ntc::StatusToString(ntcStatus), ntc::GetLastErrorMessage());
-            return false;
-        }
+    std::vector<TextureSubresourceLoadingTask> tasks;
+    size_t compressedBufferSize = 0;
+    size_t decompressedBufferSize = 0;
+    FillTextureLoadingTasksForLatents(textureSetMetadata, material.ntcLatentsTexture, g_firstLatentMipInTexture, tasks,
+        m_gdeflateFeatures && m_gdeflateFeatures->gpuDecompressionSupported, m_device->getGraphicsAPI(),
+        compressedBufferSize, decompressedBufferSize);
+    
+    if (!ExecuteTextureLoadingTasks(m_device, commandList, m_ntcContext, ntcFile, m_gdeflateFeatures.get(), tasks,
+        compressedBufferSize, decompressedBufferSize))
+        return false;
 
-        latentData.resize(footprint.range.size);
-
-        ntcFile->Seek(footprint.range.offset);
-        if (!ntcFile->Read(latentData.data(), latentData.size()))
-        {
-            log::warning("Failed to read latents for material '%s'", material.name.c_str());
-            return false;
-        }
-        
-        uint8_t const* srcData = latentData.data();
-
-        for (int layerIndex = 0; layerIndex < latentTextureDescSrc.arraySize; ++layerIndex)
-        {
-            commandList->writeTexture(material.ntcLatentsTexture, layerIndex, mipLevel - g_firstLatentMipInTexture,
-                srcData, footprint.rowPitch);
-
-            srcData += footprint.slicePitch;
-        }
-    }
-
+    commandList->open();
     commandList->writeBuffer(material.ntcConstantBuffer, &inferenceData.constants,
         sizeof(inferenceData.constants));
 
@@ -1194,6 +1250,8 @@ bool NtcMaterialLoader::PrepareMaterialForInferenceOnSample(ntc::IStream* ntcFil
     {
         commandList->writeBuffer(material.ntcWeightsBuffer, weightData, weightSize);
     }
+    commandList->close();
+    m_device->executeCommandList(commandList);
 
     if (material.baseOrDiffuseTexture)
         material.baseOrDiffuseTexture->texture = m_dummyTexture->texture;
@@ -1338,9 +1396,6 @@ bool NtcMaterialLoader::LoadMaterialsForScene(donut::engine::Scene& scene, std::
 
         ntc::ITextureSetMetadata* textureSetMetadata = *ntcMaterial->textureSetMetadata;
 
-        m_commandList->open();
-        bool loadedSuccessfully = true;
-
         ntc::Status ntcStatus = textureSetMetadata->ShuffleInferenceOutputs(channelMap.swizzle.data());
         if (ntcStatus != ntc::Status::Ok)
         {
@@ -1354,7 +1409,7 @@ bool NtcMaterialLoader::LoadMaterialsForScene(donut::engine::Scene& scene, std::
 
         // Load the material data for Inference On Sample/Feedback first, so that the latent and weight buffers
         // can be reused for On Load.
-        loadedSuccessfully = PrepareMaterialForInferenceOnSample(dataStream, textureSetMetadata,
+        bool loadedSuccessfully = PrepareMaterialForInferenceOnSample(dataStream, textureSetMetadata,
             *ntcMaterial, m_commandList);
 
         // Transcode the material into raw color data or BCn (Inference On Load).
@@ -1363,8 +1418,8 @@ bool NtcMaterialLoader::LoadMaterialsForScene(donut::engine::Scene& scene, std::
         // in a path tracing renderer).
         if (loadedSuccessfully)
         {
-            loadedSuccessfully = TranscodeMaterial(dataStream, textureSetMetadata, *ntcMaterial, m_commandList,
-                enableBlockCompression);
+            loadedSuccessfully = TranscodeMaterial(m_ntcContext, dataStream,
+                textureSetMetadata, *ntcMaterial, m_commandList, enableBlockCompression);
         }
 
         if (enableInferenceOnFeedback && loadedSuccessfully)
@@ -1373,11 +1428,8 @@ bool NtcMaterialLoader::LoadMaterialsForScene(donut::engine::Scene& scene, std::
                 enableBlockCompression);
         }
         
-        m_commandList->close();
-
         if (loadedSuccessfully)
         {
-            m_device->executeCommandList(m_commandList);
             m_device->waitForIdle();
             m_device->runGarbageCollection();
         }

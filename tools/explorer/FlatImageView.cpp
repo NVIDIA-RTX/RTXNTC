@@ -286,10 +286,11 @@ bool FlatImageView::MouseScrollUpdate(double xoffset, double yoffset)
     return true;
 }
 
-void FlatImageView::Reset()
+void FlatImageView::Reset(bool compareMode)
 {
     m_leftTexture = nullptr;
     m_rightTexture = nullptr;
+    m_displayMode = compareMode ? uint32_t(DisplayMode::SplitScreen) : uint32_t(DisplayMode::LeftTexture);
 }
 
 void FlatImageView::SetTextureSize(int width, int height, int mips)
@@ -301,7 +302,7 @@ void FlatImageView::SetTextureSize(int width, int height, int mips)
 
 void FlatImageView::SetTextures(nvrhi::ITexture* leftTexture, nvrhi::ITexture* rightTexture, int channels, bool sRGB)
 {
-    if (m_rightTexture == m_leftTexture && rightTexture != leftTexture)
+    if (m_rightTexture == m_leftTexture && rightTexture != leftTexture && m_displayMode != uint32_t(DisplayMode::SplitScreen))
     {
         // If the right texture just became available, show it
         m_displayMode = uint32_t(DisplayMode::RightTexture);

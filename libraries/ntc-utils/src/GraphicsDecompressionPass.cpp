@@ -11,7 +11,10 @@
  */
 
 #include <ntc-utils/GraphicsDecompressionPass.h>
+#include <ntc-utils/BufferLoading.h>
+#include <ntc-utils/DeviceUtils.h>
 #include <libntc/shaders/Bindings.h>
+#include <donut/core/log.h>
 
 bool GraphicsDecompressionPass::Init()
 {
@@ -85,18 +88,9 @@ void GraphicsDecompressionPass::WriteDescriptor(nvrhi::BindingSetItem item)
     m_device->writeDescriptorTable(m_descriptorTable, item);
 }
 
-static bool IsLatentTextureCompatible(nvrhi::TextureDesc const& a, nvrhi::TextureDesc const& b)
-{
-    return a.dimension == b.dimension
-        && a.format == b.format
-        && a.width == b.width
-        && a.height == b.height
-        && a.arraySize == b.arraySize
-        && a.mipLevels == b.mipLevels;
-}
-
-bool GraphicsDecompressionPass::SetLatentDataFromTextureSet(nvrhi::ICommandList* commandList, ntc::IStream* inputStream,
-    ntc::ITextureSetMetadata* textureSetMetadata)
+bool GraphicsDecompressionPass::SetLatentDataFromTextureSet(nvrhi::ICommandList* commandList, ntc::IContext* context,
+    GDeflateFeatures* gdeflateFeatures,
+    ntc::IStream* inputStream, ntc::ITextureSetMetadata* textureSetMetadata)
 {
     ntc::LatentTextureDesc const latentTextureDescSrc = textureSetMetadata->GetLatentTextureDesc();
 
@@ -108,46 +102,27 @@ bool GraphicsDecompressionPass::SetLatentDataFromTextureSet(nvrhi::ICommandList*
         .setHeight(latentTextureDescSrc.height)
         .setArraySize(latentTextureDescSrc.arraySize)
         .setMipLevels(latentTextureDescSrc.mipLevels)
-        .setInitialState(nvrhi::ResourceStates::ShaderResource)
-        .setKeepInitialState(true);
+        .setInitialState(nvrhi::ResourceStates::Common);
+        // Note: no keepInitialState! See comments in FillTextureLoadingTasksForLatents(...) for more info.
 
-    if (!m_latentTexture || m_latentTextureIsExternal ||
-        !IsLatentTextureCompatible(m_latentTexture->getDesc(), latentTextureDesc))
-    {
-        m_latentTexture = m_device->createTexture(latentTextureDesc);
-        m_latentTextureIsExternal = false;
+    // Always re-create the latent texture because it is permanently transitioned to the ShaderResource state
+    // at the end of the uploading process, and cannot be transitioned back for re-uploading.
+    m_latentTexture = m_device->createTexture(latentTextureDesc);
+    m_latentTextureIsExternal = false;
 
-        if (!m_latentTexture)
-            return false;
-    }
+    if (!m_latentTexture)
+        return false;
 
-    std::vector<uint8_t> latentsBuffer;
-    for (int mipLevel = 0; mipLevel < latentTextureDescSrc.mipLevels; ++mipLevel)
-    {
-        ntc::LatentTextureFootprint footprint;
-        ntc::Status ntcStatus = textureSetMetadata->GetLatentTextureFootprint(mipLevel, footprint);
-        if (ntcStatus != ntc::Status::Ok)
-            return false;
-
-        if (!inputStream->Seek(footprint.range.offset))
-            return false;
-
-        latentsBuffer.resize(footprint.range.size);
-            
-        if (!inputStream->Read(latentsBuffer.data(), latentsBuffer.size()))
-            return false;
-
-        uint8_t const* srcData = latentsBuffer.data();
-
-        for (int layerIndex = 0; layerIndex < latentTextureDescSrc.arraySize; ++layerIndex)
-        {
-            commandList->writeTexture(m_latentTexture, layerIndex, mipLevel,
-                srcData, footprint.rowPitch);
-
-            srcData += footprint.slicePitch;
-        }
-    }
-
+    std::vector<TextureSubresourceLoadingTask> tasks;
+    size_t compressedBufferSize = 0;
+    size_t decompressedBufferSize = 0;
+    FillTextureLoadingTasksForLatents(textureSetMetadata, m_latentTexture, 0, tasks,
+        gdeflateFeatures && gdeflateFeatures->gpuDecompressionSupported, m_device->getGraphicsAPI(),
+        compressedBufferSize, decompressedBufferSize);
+    
+    if (!ExecuteTextureLoadingTasks(m_device, commandList, context, inputStream, gdeflateFeatures, tasks,
+        compressedBufferSize, decompressedBufferSize))
+        return false;
 
     return true;
 }

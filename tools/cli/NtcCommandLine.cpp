@@ -37,12 +37,14 @@ struct
     const char* saveImagesPath = nullptr;
     const char* loadCompressedFileName = nullptr;
     const char* saveCompressedFileName = nullptr;
+    const char* saveManifestFileName = nullptr;
     ToolInputType inputType = ToolInputType::None;
     std::vector<char const*> loadImagesList;
     std::optional<ntc::BlockCompressedFormat> bcFormat;
     ImageContainer imageFormat = ImageContainer::Auto;
     bool compress = false;
     bool decompress = false;
+    bool readManifestFromStdin = false;
     bool loadMips = false;
     bool saveMips = false;
     bool generateMips = false;
@@ -55,6 +57,7 @@ struct
     bool describe = false;
     bool discardMaskedOutPixels = false;
     bool enableCoopVec = true;
+    bool enableGpuDeflate = false;
     bool printVersion = false;
     int gridSizeScale = 2;
     int numFeatures = NTC_MLP_FEATURES;
@@ -69,11 +72,11 @@ struct
     float minBcPsnr = 0.f;
     float maxBcPsnr = INFINITY;
     float bcPsnrOffset = 0.f;
-    int bcQuality = -1;
     float bcPsnrThreshold = 0.2f;
     std::optional<int> customWidth;
     std::optional<int> customHeight;
     ntc::CompressionSettings compressionSettings;
+    ntc::LosslessCompressionSettings losslessCompression;
 } g_options;
 
 bool ProcessCommandLine(int argc, const char** argv)
@@ -81,6 +84,7 @@ bool ProcessCommandLine(int argc, const char** argv)
     const char* bcFormatString = nullptr;
     const char* imageFormatString = nullptr;
     const char* dimensionsString = nullptr;
+    const char* gdeflateString = nullptr;
 
     struct argparse_option options[] = {
         OPT_GROUP("Actions:"),
@@ -93,8 +97,10 @@ bool ProcessCommandLine(int argc, const char** argv)
         OPT_STRING (0,   "loadManifest", &g_options.loadManifestFileName, "Load channel images and their parameters using the specified JSON manifest file"),
         OPT_BOOLEAN(0,   "loadMips", &g_options.loadMips, "Load MIP level images from <loadImages>/mips/<texture>.<mip>.<ext> before compression"),
         OPT_BOOLEAN(0,   "optimizeBC", &g_options.optimizeBC, "Run slow BC compression and store acceleration info in the NTC package"),
+        OPT_BOOLEAN(0,   "readManifestFromStdin", &g_options.readManifestFromStdin, "Load channel images using a JSON manifest passed through standard input (stdin)"),
         OPT_STRING ('o', "saveCompressed", &g_options.saveCompressedFileName, "Save compressed texture set into the specified file"),
         OPT_STRING ('i', "saveImages", &g_options.saveImagesPath, "Save channel images into the specified folder"),
+        OPT_STRING (0,   "saveManifest", &g_options.saveManifestFileName, "Save a manifest JSON file (only for image inputs)"),
         OPT_BOOLEAN(0,   "saveMips", &g_options.saveMips, "Save MIP level images into <saveImages>/mips/ after decompression"),
         OPT_BOOLEAN(0,   "version", &g_options.printVersion, "Print version information and exit"),
         OPT_HELP(),
@@ -124,7 +130,6 @@ bool ProcessCommandLine(int argc, const char** argv)
         
         OPT_GROUP("Advanced settings:"),
         OPT_FLOAT  (0,   "bcPsnrThreshold", &g_options.bcPsnrThreshold, "PSNR loss threshold for BC7 optimization, in dB, default value is 0.2"),
-        OPT_INTEGER(0,   "bcQuality", &g_options.bcQuality, "Quality knob for BC7 compression, [0, 255]"),
         OPT_INTEGER(0,   "benchmark", &g_options.benchmarkIterations, "Number of iterations to run over compute passes for benchmarking"),
         OPT_BOOLEAN(0,   "discardMaskedOutPixels", &g_options.discardMaskedOutPixels, "Ignore contents of pixels where alpha mask is 0.0 (requires the AlphaMask semantic)"),
         OPT_FLOAT  (0,   "experimentalKnob", &g_options.experimentalKnob, "A parameter for NTC development, normally has no effect"),
@@ -132,10 +137,16 @@ bool ProcessCommandLine(int argc, const char** argv)
         OPT_FLOAT  (0,   "minBcPsnr", &g_options.minBcPsnr, "When using --matchBcPsnr, minimum PSNR value to use for NTC compression"),
         OPT_FLOAT  (0,   "maxBcPsnr", &g_options.maxBcPsnr, "When using --matchBcPsnr, maximum PSNR value to use for NTC compression"),
         OPT_FLOAT  (0,   "bcPsnrOffset", &g_options.bcPsnrOffset, "When using --matchBcPsnr, offset to apply to BCn PSNR value before NTC compression"),
+        OPT_STRING (0,   "gdeflate", &gdeflateString, "Controls which parts of the texture set file should be compressed with GDeflate (off/none, bc, latents, all; default is bc)"),
+        OPT_FLOAT  (0,   "gdeflateThreshold", &g_options.losslessCompression.compressionRatioThreshold,
+            "Don't use GDeflate compression if sizeof(compressedData) >= sizeof(uncompressedData) * X, default is 0.95"),
+        OPT_INTEGER(0,   "gdeflateLevel", &g_options.losslessCompression.compressionLevel, "GDeflate compression level, 0-12, default is 9"),
+        OPT_INTEGER(0,   "gdeflateThreads", &g_options.losslessCompression.compressionThreads, "Number of GDeflate compression threads, 0 means auto, -1 means disable"),
         
         OPT_GROUP("GPU and Graphics API settings:"),
         OPT_INTEGER(0, "adapter", &g_options.adapterIndex, "Index of the graphics adapter to use"),
         OPT_BOOLEAN(0, "coopVec", &g_options.enableCoopVec, "Enable CoopVec extensions (default on, use --no-coopVec)"),
+        OPT_BOOLEAN(0, "gpuGDeflate", &g_options.enableGpuDeflate, "Enable GPU-based GDeflate decompression"),
         OPT_INTEGER(0, "cudaDevice", &g_options.cudaDevice, "Index of the CUDA device to use"),
         OPT_BOOLEAN(0, "debug", &g_options.debug, "Enable debug features such as Vulkan validation layer or D3D12 debug runtime"),
 #if NTC_WITH_DX12
@@ -189,6 +200,12 @@ bool ProcessCommandLine(int argc, const char** argv)
         return false;
     }
 
+    if (g_options.loadManifestFileName && g_options.readManifestFromStdin)
+    {
+        fprintf(stderr, "Options --loadManifest and --readManifestFromStdin cannot be used at the same time.\n");
+        return false;
+    }
+
     // Process explicit inputs
     if (g_options.loadImagesPath)
     {
@@ -209,7 +226,12 @@ bool ProcessCommandLine(int argc, const char** argv)
             return false;
         }
 
-        UpdateToolInputType(g_options.inputType, ToolInputType::Manifest);
+        UpdateToolInputType(g_options.inputType, ToolInputType::ManifestFile);
+    }
+
+    if (g_options.readManifestFromStdin)
+    {
+        UpdateToolInputType(g_options.inputType, ToolInputType::ManifestStdin);
     }
 
     if (g_options.loadCompressedFileName)
@@ -243,7 +265,7 @@ bool ProcessCommandLine(int argc, const char** argv)
 
             if (extension == ".json")
             {
-                UpdateToolInputType(g_options.inputType, ToolInputType::Manifest);
+                UpdateToolInputType(g_options.inputType, ToolInputType::ManifestFile);
                 g_options.loadManifestFileName = arg;
             }
             else if (extension == ".ntc")
@@ -297,6 +319,12 @@ bool ProcessCommandLine(int argc, const char** argv)
         return false;
     }
 
+    if (g_options.saveManifestFileName && g_options.inputType == ToolInputType::CompressedTextureSet)
+    {
+        fprintf(stderr, "Cannot save a manifest file when the input is a compressed texture set.\n");
+        return false;
+    }
+
     if (g_options.saveImagesPath && (g_options.compress || g_options.inputType == ToolInputType::CompressedTextureSet))
     {
         // When saving images from a compressed texture set, --decompress is implied.
@@ -324,12 +352,6 @@ bool ProcessCommandLine(int argc, const char** argv)
     if (g_options.optimizeBC && !g_options.decompress)
     {
         fprintf(stderr, "Option --optimizeBC requires --decompress.\n");
-        return false;
-    }
-
-    if ((g_options.bcQuality < 0 || g_options.bcQuality > 255) && g_options.bcQuality != -1)
-    {
-        fprintf(stderr, "The --bcQuality value (%d) must be between 0 and 255.\n", g_options.bcQuality);
         return false;
     }
 
@@ -418,6 +440,35 @@ bool ProcessCommandLine(int argc, const char** argv)
         if (!fs::is_directory(outputPath) && !fs::create_directories(outputPath))
         {
             fprintf(stderr, "Failed to create directories for '%s'.\n", g_options.saveImagesPath);
+            return false;
+        }
+    }
+
+    if (gdeflateString)
+    {
+        if (strcasecmp(gdeflateString, "off") == 0 || strcasecmp(gdeflateString, "none") == 0)
+        {
+            g_options.losslessCompression.compressBCModeBuffers = false;
+            g_options.losslessCompression.compressLatents = false;
+        }
+        else if (strcasecmp(gdeflateString, "bc") == 0)
+        {
+            g_options.losslessCompression.compressBCModeBuffers = true;
+            g_options.losslessCompression.compressLatents = false;
+        }
+        else if (strcasecmp(gdeflateString, "latents") == 0)
+        {
+            g_options.losslessCompression.compressBCModeBuffers = false;
+            g_options.losslessCompression.compressLatents = true;
+        }
+        else if (strcasecmp(gdeflateString, "all") == 0)
+        {
+            g_options.losslessCompression.compressBCModeBuffers = true;
+            g_options.losslessCompression.compressLatents = true;
+        }
+        else
+        {
+            fprintf(stderr, "Invalid value '%s' for --gdeflate.\n", gdeflateString);
             return false;
         }
     }
@@ -599,7 +650,51 @@ bool PickLatentShape(ntc::LatentShape& outShape)
     return true;
 }
 
-ntc::ITextureSet* LoadImages(ntc::IContext* context, Manifest const& manifest, bool manifestIsGenerated)
+void OverrideTextureBcFormat(ntc::ITextureMetadata* texture, ManifestEntry* manifestEntry)
+{
+    // Override the BC format from command line, if specified.
+    // Overriding with 'none' is also an option here.
+    if (g_options.bcFormat.has_value())
+    {
+        ntc::BlockCompressedFormat bcFormat = *g_options.bcFormat;
+
+        // Automatic selection of BCn mode based on channel count and HDR-ness
+        if (bcFormat == BlockCompressedFormat_Auto)
+        {
+            ntc::ChannelFormat const channelFormat = texture->GetChannelFormat();
+            if (channelFormat == ntc::ChannelFormat::FLOAT16 || channelFormat == ntc::ChannelFormat::FLOAT32)
+            {
+                // HDR textures use only BC6, no other options
+                bcFormat = ntc::BlockCompressedFormat::BC6;
+            }
+            else
+            {
+                // Best quality options.
+                // If you want more control, use a manifest.
+                int const channels = texture->GetNumChannels();
+                switch(channels)
+                {
+                    case 1:  bcFormat = ntc::BlockCompressedFormat::BC4; break;
+                    case 2:  bcFormat = ntc::BlockCompressedFormat::BC5; break;
+                    default: bcFormat = ntc::BlockCompressedFormat::BC7; break;
+                }       
+            }
+        }
+
+        assert(bcFormat != BlockCompressedFormat_Auto);
+
+        texture->SetBlockCompressedFormat(bcFormat);
+
+        // Apply the same override to the manifest entry, if it's provided
+        // (in case the user wants to save the manifest)
+        if (manifestEntry)
+        {
+            manifestEntry->bcFormat = bcFormat;
+        }
+    }
+}
+
+ntc::ITextureSet* LoadImages(ntc::IContext* context, Manifest& manifest, bool manifestIsGenerated)
 {
     ntc::TextureSetDesc textureSetDesc{};
     textureSetDesc.mips = 1;
@@ -828,12 +923,21 @@ ntc::ITextureSet* LoadImages(ntc::IContext* context, Manifest const& manifest, b
 
             GuessImageSemantics(image->name, image->channels, image->channelFormat, image->manifestIndex,
                 image->isSRGB, semantics);
+            
+            // Copy the generated semantics into the manifest in case the user requested to save the manifest
+            ManifestEntry& manifestEntry = manifest.textures[image->manifestIndex];
+            manifestEntry.isSRGB = image->isSRGB;
 
             // If one of the channels is the alpha mask, remember that
             for (auto const& binding : semantics)
             {
                 if (binding.label == SemanticLabel::AlphaMask)
                     image->alphaMaskChannel = binding.firstChannel;
+
+                ImageSemanticBinding manifestBinding;
+                manifestBinding.label = binding.label;
+                manifestBinding.firstChannel = binding.firstChannel;
+                manifestEntry.semantics.push_back(manifestBinding);
             }
         }
     }
@@ -1205,6 +1309,8 @@ ntc::ITextureSet* LoadImages(ntc::IContext* context, Manifest const& manifest, b
         texture->SetRgbColorSpace(srcRgbColorSpace);
         texture->SetAlphaColorSpace(srcAlphaColorSpace);
 
+        OverrideTextureBcFormat(texture, &manifest.textures[image->manifestIndex]);
+
         // Copy the loss function scales for this image's channels into the global array
         assert(image->channels == int(image->lossFunctionScales.size()));
         for (int channel = 0; channel < image->channels; ++channel)
@@ -1367,7 +1473,8 @@ bool DecompressTextureSet(ntc::IContext* context, ntc::ITextureSet* textureSet, 
     printf("CUDA decompression time: %.3f ms\n", stats.gpuTimeMilliseconds);
 
     if (g_options.inputType == ToolInputType::Directory ||
-        g_options.inputType == ToolInputType::Manifest ||
+        g_options.inputType == ToolInputType::ManifestFile ||
+        g_options.inputType == ToolInputType::ManifestStdin ||
         g_options.inputType == ToolInputType::Images)
     {
         printf("Overall PSNR (%s weights): %.2f dB\n", useInt8Weights ? "INT8" : "FP8", ntc::LossToPSNR(stats.overallLoss));
@@ -1440,7 +1547,11 @@ bool SaveCompressedTextureSet(ntc::IContext* context, ntc::ITextureSet* textureS
         return false;
     }
 
-    ntcStatus = textureSet->SaveToStream(outputStream);
+    ntcStatus = textureSet->ConfigureLosslessCompression(g_options.losslessCompression);
+    CHECK_NTC_RESULT(ConfigureLosslessCompression);
+
+    ntc::LosslessCompressionStats losslessStats;
+    ntcStatus = textureSet->SaveToStream(outputStream, &losslessStats);
     if (ntcStatus != ntc::Status::Ok)
     {
         fprintf(stderr, "Failed to save compressed texture to output file '%s', code = %s\n%s\n",
@@ -1454,6 +1565,20 @@ bool SaveCompressedTextureSet(ntc::IContext* context, ntc::ITextureSet* textureS
 
     printf("Saved '%s'\n", g_options.saveCompressedFileName);
     printf("File size: %" PRIu64 " bytes, %.2f bits per pixel.\n", fileSize, bpp);
+    if (g_options.losslessCompression.compressBCModeBuffers || g_options.losslessCompression.compressLatents)
+    {
+        double const compressedBufferRatioPercents = (losslessStats.originalSizeOfCompressedBuffers == 0) ? 0.0 :
+            100.0 * double(losslessStats.sizeOfCompressedBuffers) / double(losslessStats.originalSizeOfCompressedBuffers);
+
+        double const overallCmpressionRatioPercents = 100.0 *
+            double(losslessStats.sizeOfCompressedBuffers + losslessStats.sizeOfUncompressedBuffers) /
+            double(losslessStats.originalSizeOfCompressedBuffers + losslessStats.sizeOfUncompressedBuffers);
+
+        printf("%s compressed %d buffers out of %d, compressed ratio %.1f%%, overall ratio %.1f%%, time %.2f ms\n",
+            ntc::CompressionTypeToString(g_options.losslessCompression.algorithm),
+            losslessStats.compressedBuffers, losslessStats.totalBuffers,
+            compressedBufferRatioPercents, overallCmpressionRatioPercents, losslessStats.compressionTimeMs);
+    }
 
     return true;
 }
@@ -1486,7 +1611,7 @@ donut::app::DeviceCreationParameters GetGraphicsDeviceParameters(nvrhi::Graphics
     deviceParams.enableDebugRuntime = g_options.debug;
     deviceParams.enableNvrhiValidationLayer = g_options.debug;
 
-    SetNtcGraphicsDeviceParameters(deviceParams, graphicsApi, true, nullptr);
+    SetNtcGraphicsDeviceParameters(deviceParams, graphicsApi, true, g_options.enableCoopVec, nullptr);
 
     return deviceParams;
 }
@@ -1503,6 +1628,35 @@ void DescribeTextureSet(ntc::ITextureSetMetadata* textureSet)
     printf("Inference weights: Int8 [%c], FP8 [%c]\n",
         textureSet->IsInferenceWeightTypeSupported(ntc::InferenceWeightType::GenericInt8) ? 'Y' : 'N',
         textureSet->IsInferenceWeightTypeSupported(ntc::InferenceWeightType::GenericFP8) ? 'Y' : 'N');
+    
+    ntc::CompressionType latentCompression = ntc::CompressionType::None;
+    ntc::LatentTextureDesc const latentTextureDesc = textureSet->GetLatentTextureDesc();
+    int totalLatentBuffers = 0;
+    int compressedLatentBuffers = 0;
+    for (int mipLevel = 0; mipLevel < latentTextureDesc.mipLevels; ++mipLevel)
+    {
+        for (int layerIndex = 0; layerIndex < latentTextureDesc.arraySize; ++layerIndex)
+        {
+            ntc::LatentTextureFootprint footprint;
+            ntc::Status ntcStatus = textureSet->GetLatentTextureFootprint(mipLevel, layerIndex, footprint);
+
+            if (ntcStatus == ntc::Status::Ok)
+            {
+                ++totalLatentBuffers;
+                if (footprint.buffer.compressionType != ntc::CompressionType::None)
+                {
+                    latentCompression = footprint.buffer.compressionType;
+                    ++compressedLatentBuffers;
+                }
+            }
+        }
+    }
+    printf("Latent compression: %s", ntc::CompressionTypeToString(latentCompression));
+    if (latentCompression != ntc::CompressionType::None)
+    {
+        printf(" (%d/%d slices)", compressedLatentBuffers, totalLatentBuffers);
+    }
+    printf("\n");
         
     printf("Textures:\n");
     for (int i = 0; i < textureSet->GetTextureCount(); ++i)
@@ -1518,13 +1672,6 @@ void DescribeTextureSet(ntc::ITextureSetMetadata* textureSet)
         if (numChannels > 3)
             printf("   Alpha color space: %s\n", ntc::ColorSpaceToString(texture->GetAlphaColorSpace()));
 
-        if (texture->GetBlockCompressedFormat() == ntc::BlockCompressedFormat::BC7)
-        {
-            printf("   BC acceleration data: %s\n", texture->HasBlockCompressionAccelerationData() ? "YES" : "NO");
-            if (texture->HasBlockCompressionAccelerationData())
-                printf("   BC default quality: %d\n", texture->GetBlockCompressionQuality());
-        }
-        
         bool colorSpacesMatch = true;
         for (int ch = 0; ch < numChannels; ++ch)
         {
@@ -1543,6 +1690,42 @@ void DescribeTextureSet(ntc::ITextureSetMetadata* textureSet)
             {
                 if (ch > 0) printf(", ");
                 printf("%s", ntc::ColorSpaceToString(textureSet->GetChannelStorageColorSpace(firstChannel + ch)));
+            }
+            printf("\n");
+        }
+
+        if (texture->GetBlockCompressedFormat() == ntc::BlockCompressedFormat::BC7)
+        {
+            ntc::CompressionType compression = ntc::CompressionType::None;
+            int totalModeBuffers = 0;
+            int compressedModeBuffers = 0;
+
+            for (int mipLevel = 0; mipLevel < desc.mips; ++mipLevel)
+            {
+                ntc::BufferFootprint modeBufferFootprint = texture->GetBC7ModeBufferFootprint(mipLevel);
+
+                if (modeBufferFootprint.rangeInStream.size != 0)
+                {
+                    ++totalModeBuffers;
+
+                    if (modeBufferFootprint.compressionType != ntc::CompressionType::None)
+                    {
+                        compression = modeBufferFootprint.compressionType;
+                        ++compressedModeBuffers;
+                    }
+                }
+            }
+
+            char const* modeBufferInfo = (totalModeBuffers == 0) ? "None"
+                : (totalModeBuffers == desc.mips) ? "All MIPs"
+                : "Partial";
+
+            printf("   BC7 acceleration data: %s", modeBufferInfo);
+            if (totalModeBuffers > 0)
+            {
+                printf(", Compression: %s", ntc::CompressionTypeToString(compression));
+                if (compression != ntc::CompressionType::None)
+                    printf(" (%d/%d buffers)", compressedModeBuffers, totalModeBuffers);
             }
             printf("\n");
         }
@@ -1585,42 +1768,9 @@ static bool ListCudaDevices()
 
 void OverrideBcFormats(ntc::ITextureSetMetadata* textureSetMetadata)
 {
-    // Override the BC format from command line, if specified.
-    // Overriding with 'none' is also an option here.
-    if (g_options.bcFormat.has_value())
+    for (int textureIndex = 0; textureIndex < textureSetMetadata->GetTextureCount(); ++textureIndex)
     {
-        for (int textureIndex = 0; textureIndex < textureSetMetadata->GetTextureCount(); ++textureIndex)
-        {
-            ntc::ITextureMetadata* texture = textureSetMetadata->GetTexture(textureIndex);
-            ntc::BlockCompressedFormat bcFormat = *g_options.bcFormat;
-
-            // Automatic selection of BCn mode based on channel count and HDR-ness
-            if (bcFormat == BlockCompressedFormat_Auto)
-            {
-                ntc::ChannelFormat const channelFormat = texture->GetChannelFormat();
-                if (channelFormat == ntc::ChannelFormat::FLOAT16 || channelFormat == ntc::ChannelFormat::FLOAT32)
-                {
-                    // HDR textures use only BC6, no other options
-                    bcFormat = ntc::BlockCompressedFormat::BC6;
-                }
-                else
-                {
-                    // Best quality options.
-                    // If you want more control, use a manifest.
-                    int const channels = texture->GetNumChannels();
-                    switch(channels)
-                    {
-                        case 1:  bcFormat = ntc::BlockCompressedFormat::BC4; break;
-                        case 2:  bcFormat = ntc::BlockCompressedFormat::BC5; break;
-                        default: bcFormat = ntc::BlockCompressedFormat::BC7; break;
-                    }       
-                }
-            }
-
-            assert(bcFormat != BlockCompressedFormat_Auto);
-    
-            texture->SetBlockCompressedFormat(bcFormat);
-        }
+        OverrideTextureBcFormat(textureSetMetadata->GetTexture(textureIndex), nullptr);
     }
 }
 
@@ -1729,6 +1879,7 @@ int main(int argc, const char** argv)
     nvrhi::DeviceHandle device;
     nvrhi::CommandListHandle commandList;
     nvrhi::TimerQueryHandle timerQuery;
+    std::unique_ptr<GDeflateFeatures> gdeflateFeatures;
 
     if (useGapi)
     {
@@ -1808,8 +1959,11 @@ int main(int argc, const char** argv)
         device = deviceManager->GetDevice();
         commandList = device->createCommandList();
         timerQuery = device->createTimerQuery();
+        if (g_options.enableGpuDeflate)
+        {
+            gdeflateFeatures = InitGDeflate(device, g_options.debug);
+        }
     }
-
 
     // Initialize the NTC context with or without the graphics device
     ntc::ContextParameters contextParams;
@@ -1856,10 +2010,11 @@ int main(int argc, const char** argv)
 
     if (useGapi)
     {
-        printf("Using %s with %s API. CoopVec [%c]\n",
+        printf("Using %s with %s API. CoopVec [%c], GDeflate [%c]\n",
             deviceManager->GetRendererString(),
             nvrhi::utils::GraphicsAPIToString(deviceManager->GetGraphicsAPI()),
-            context->IsCooperativeVectorSupported() ? 'Y' : 'N');
+            context->IsCooperativeVectorSupported() ? 'Y' : 'N',
+            gdeflateFeatures && gdeflateFeatures->gpuDecompressionSupported ? 'Y' : 'N');
     }
 
     if (graphicsDecompressMode || describeMode)
@@ -1913,17 +2068,13 @@ int main(int argc, const char** argv)
 
         for (int iteration = 0; iteration < g_options.benchmarkIterations; ++iteration)
         {
-            commandList->open();
-
-            bool const decompressSucceeded = DecompressTextureSetWithGraphicsAPI(commandList, timerQuery, gdp,
-                    context, metadata, iteration == 0 ? inputFile.Get() : nullptr, mipLevels, graphicsResources);
-
-            commandList->close();
+            bool const decompressSucceeded = DecompressTextureSetWithGraphicsAPI(device, commandList,
+                timerQuery, gdp, gdeflateFeatures.get(),
+                context, metadata, iteration == 0 ? inputFile.Get() : nullptr, mipLevels, graphicsResources);
 
             if (!decompressSucceeded)
                 return 1;
 
-            device->executeCommandList(commandList);
             device->waitForIdle();
             device->runGarbageCollection();
 
@@ -1944,8 +2095,9 @@ int main(int argc, const char** argv)
         {
             if (anyBCTextures)
             {
-                if (!BlockCompressAndSaveGraphicsTextures(context, metadata, device, commandList, timerQuery,
-                    g_options.saveImagesPath, g_options.bcQuality, g_options.benchmarkIterations, graphicsResources))
+                if (!BlockCompressAndSaveGraphicsTextures(context, metadata, inputFile.Get(),
+                    device, commandList, timerQuery, gdeflateFeatures.get(),
+                    g_options.saveImagesPath, g_options.benchmarkIterations, graphicsResources))
                     return 1;
             }
 
@@ -1958,12 +2110,12 @@ int main(int argc, const char** argv)
     {
         ntc::TextureSetWrapper textureSet(context);
 
+        Manifest manifest;
         switch (g_options.inputType)
         {
             case ToolInputType::Directory: {
                 assert(g_options.loadImagesPath);
 
-                Manifest manifest;
                 GenerateManifestFromDirectory(g_options.loadImagesPath, g_options.loadMips, manifest);
                 *textureSet.ptr() = LoadImages(context, manifest, true);
                 break;
@@ -1971,17 +2123,26 @@ int main(int argc, const char** argv)
             case ToolInputType::Images: {
                 assert(!g_options.loadImagesList.empty());
 
-                Manifest manifest;
                 GenerateManifestFromFileList(g_options.loadImagesList, manifest);
                 *textureSet.ptr() = LoadImages(context, manifest, true);
                 break;
             }
-            case ToolInputType::Manifest: {
+            case ToolInputType::ManifestFile: {
                 assert(g_options.loadManifestFileName);
 
-                Manifest manifest;
                 std::string manifestError;
                 if (!ReadManifestFromFile(g_options.loadManifestFileName, manifest, manifestError))
+                {
+                    fprintf(stderr, "%s\n", manifestError.c_str());
+                    return 1;
+                }
+
+                *textureSet.ptr() = LoadImages(context, manifest, false);
+                break;
+            }
+            case ToolInputType::ManifestStdin: {
+                std::string manifestError;
+                if (!ReadManifestFromStdin(manifest, manifestError))
                 {
                     fprintf(stderr, "%s\n", manifestError.c_str());
                     return 1;
@@ -1994,6 +2155,14 @@ int main(int argc, const char** argv)
                 assert(g_options.loadCompressedFileName);
 
                 *textureSet.ptr() = LoadCompressedTextureSet(context);
+                
+                if (textureSet)
+                {
+                    // LoadImages already applies overrides to the texture set and the manifest,
+                    // so process the overrides here for the case of loading a compressed texture set.
+                    OverrideBcFormats(textureSet);
+                }
+
                 break;
             }
             default:
@@ -2004,11 +2173,23 @@ int main(int argc, const char** argv)
         if (!textureSet)
             return 1;
 
-        OverrideBcFormats(textureSet);
-
         if (g_options.describe)
         {
             DescribeTextureSet(textureSet);
+        }
+
+        if (g_options.saveManifestFileName)
+        {
+            std::string manifestError;
+            if (!WriteManifestToFile(g_options.saveManifestFileName, manifest, manifestError))
+            {
+                fprintf(stderr, "%s\n", manifestError.c_str());
+                return 1;
+            }
+            else
+            {
+                printf("Saved manifest to '%s'\n", g_options.saveManifestFileName);
+            }
         }
 
         textureSet->SetExperimentalKnob(g_options.experimentalKnob);
@@ -2033,7 +2214,7 @@ int main(int argc, const char** argv)
                 return 1;
             }
 
-            int const mipLevels = g_options.saveImagesPath && g_options.saveMips ? textureSet->GetDesc().mips : 1;
+            int const mipLevels = textureSet->GetDesc().mips;
 
             if (!CreateGraphicsResourcesFromMetadata(context, device, textureSet,
                 mipLevels, /* enableCudaSharing = */ true, graphicsResources))
@@ -2105,8 +2286,9 @@ int main(int argc, const char** argv)
         {
             if (anyBCTextures)
             {
-                if (!BlockCompressAndSaveGraphicsTextures(context, textureSet, device, commandList, timerQuery,
-                    g_options.saveImagesPath, g_options.bcQuality, g_options.benchmarkIterations, graphicsResources))
+                if (!BlockCompressAndSaveGraphicsTextures(context, textureSet, nullptr,
+                    device, commandList, timerQuery, gdeflateFeatures.get(),
+                    g_options.saveImagesPath, g_options.benchmarkIterations, graphicsResources))
                     return 1;
             }
                 

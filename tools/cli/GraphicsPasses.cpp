@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -12,6 +12,8 @@
 
 #include "GraphicsPasses.h"
 #include "Utils.h"
+#include <ntc-utils/BufferLoading.h>
+#include <ntc-utils/DeviceUtils.h>
 #include <ntc-utils/GraphicsDecompressionPass.h>
 #include <ntc-utils/GraphicsImageDifferencePass.h>
 #include <ntc-utils/GraphicsBlockCompressionPass.h>
@@ -22,7 +24,6 @@
 #include <numeric>
 #include <memory>
 #include <mutex>
-
 namespace fs = std::filesystem;
 
 bool CreateGraphicsResourcesFromMetadata(
@@ -178,32 +179,15 @@ bool CreateGraphicsResourcesFromMetadata(
         resources.perTexture.push_back(std::move(textureResources));
     }
 
-    nvrhi::BufferDesc bufferDesc = nvrhi::BufferDesc()
-        .setByteSize(ntc::BlockCompressionAccelerationBufferSize)
-        .setDebugName("Acceleration Buffer")
-        .setCanHaveUAVs(true)
-        .setCanHaveRawViews(true)
-        .setInitialState(nvrhi::ResourceStates::UnorderedAccess)
-        .setKeepInitialState(true);
-    resources.accelerationBuffer = device->createBuffer(bufferDesc);
-    if (!resources.accelerationBuffer)
-        return false;
-
-    nvrhi::BufferDesc stagingBufferDesc = nvrhi::BufferDesc()
-        .setByteSize(ntc::BlockCompressionAccelerationBufferSize)
-        .setDebugName("Acceleration Staging Buffer")
-        .setCpuAccess(nvrhi::CpuAccessMode::Read);
-    resources.accelerationStagingBuffer = device->createBuffer(stagingBufferDesc);
-    if (!resources.accelerationStagingBuffer)
-        return false;
-    
     return true;
 }
 
 bool DecompressTextureSetWithGraphicsAPI(
+    nvrhi::IDevice* device,
     nvrhi::ICommandList* commandList,
     nvrhi::ITimerQuery* timerQuery,
     GraphicsDecompressionPass& gdp,
+    GDeflateFeatures* gdeflateFeatures,
     ntc::IContext* context,
     ntc::ITextureSetMetadata* metadata,
     ntc::IStream* inputFile,
@@ -213,7 +197,7 @@ bool DecompressTextureSetWithGraphicsAPI(
     // In some cases, this function is called without a file - which means we reuse the previously uploaded data.
     if (inputFile)
     {
-        if (!gdp.SetLatentDataFromTextureSet(commandList, inputFile, metadata))
+        if (!gdp.SetLatentDataFromTextureSet(commandList, context, gdeflateFeatures, inputFile, metadata))
         {
             fprintf(stderr, "GraphicsDecompressionPass::SetInputData failed.\n");
             return false;
@@ -244,9 +228,12 @@ bool DecompressTextureSetWithGraphicsAPI(
         return false;
     }
 
+    commandList->open();
+
     if (!gdp.SetWeightsFromTextureSet(commandList, metadata, weightType))
     {
         fprintf(stderr, "GraphicsDecompressionPass::SetWeightsFromTextureSet failed.\n");
+        commandList->close();
         return false;
     }
 
@@ -268,6 +255,7 @@ bool DecompressTextureSetWithGraphicsAPI(
         if (!gdp.ExecuteComputePass(commandList, computePass))
         {
             fprintf(stderr, "GraphicsDecompressionPass::ExecuteComputePass failed.\n");
+            commandList->close();
             return false;
         }
     }
@@ -285,6 +273,9 @@ bool DecompressTextureSetWithGraphicsAPI(
         }
     }
 
+    commandList->close();
+    device->executeCommandList(commandList);
+    
     return true;
 }
 
@@ -498,6 +489,7 @@ bool ComputeBlockCompressedImageError(
     GraphicsResourcesForTexture const& textureResources,
     uint32_t width,
     uint32_t height,
+    int mipLevel,
     bool reuseCompressedData,
     bool useAlphaThreshold,
     float alphaThreshold,
@@ -526,7 +518,7 @@ bool ComputeBlockCompressedImageError(
     }
 
     if (!compareImagesPass.ExecuteComputePass(commandList,  computePass,
-        textureResources.bc, 0, textureResources.color, 0, 0))
+        textureResources.bc, 0, textureResources.color, mipLevel, 0))
     {
         commandList->close();
         return false;
@@ -550,15 +542,16 @@ bool ComputeBlockCompressedImageError(
 bool BlockCompressAndSaveGraphicsTextures(
     ntc::IContext* context,
     ntc::ITextureSetMetadata* metadata,
+    ntc::IStream* inputFile,
     nvrhi::IDevice* device,
     nvrhi::ICommandList* commandList,
     nvrhi::ITimerQuery* timerQuery,
+    GDeflateFeatures* gdeflateFeatures,
     char const* savePath,
-    int userProvidedBcQuality,
     int benchmarkIterations,
     GraphicsResourcesForTextureSet const& graphicsResources)
 {
-    GraphicsBlockCompressionPass blockCompressionPass(device, false, 2);
+    GraphicsBlockCompressionPass blockCompressionPass(device, 2);
     if (!blockCompressionPass.Init())
         return false;
 
@@ -568,7 +561,7 @@ bool BlockCompressAndSaveGraphicsTextures(
 
     float const alphaThreshold = 1.f / 255.f;
 
-    nvrhi::TextureHandle compressedTexture;
+    ntc::TextureSetDesc const& textureSetDesc = metadata->GetDesc();
     
     for (int index = 0; index < int(graphicsResources.perTexture.size()); ++index)
     {
@@ -581,6 +574,24 @@ bool BlockCompressAndSaveGraphicsTextures(
 
         bool const useAlphaThreshold = bcFormat == ntc::BlockCompressedFormat::BC1;
         bool const useMSLE = bcFormat == ntc::BlockCompressedFormat::BC6;
+
+        nvrhi::BufferHandle modeBuffer;
+        std::vector<BufferLoadingTask> modeBufferTasks;
+
+        if (bcFormat == ntc::BlockCompressedFormat::BC7)
+        {
+            size_t stagingBufferSize = 0;
+            size_t tempBufferSize = 0;
+            size_t finalBufferSize = 0;
+
+            FillBufferLoadingTasksForBC(textureSetDesc, textureMetadata, modeBufferTasks,
+                gdeflateFeatures && gdeflateFeatures->gpuDecompressionSupported, device->getGraphicsAPI(),
+                stagingBufferSize, tempBufferSize, finalBufferSize);
+            
+            if (!ExecuteBufferLoadingTasks(device, commandList, context, inputFile, gdeflateFeatures,
+                modeBufferTasks, modeBuffer, stagingBufferSize, tempBufferSize, finalBufferSize))
+                return false;
+        }
 
         nvrhi::TextureDesc const& textureDesc = textureResources.color->getDesc();
         BcFormatDefinition const* bcFormatDef = GetBcFormatDefinition(bcFormat);
@@ -602,9 +613,9 @@ bool BlockCompressAndSaveGraphicsTextures(
             return false;
         }
 
-        float mipChainCompressionTimeMs = 0;
-        float mipZeroMSE = 0;
-        float mipZeroPSNR = 0;
+        float perMipCompressionTimeMs[NTC_MAX_MIPS]{};
+        float perMipMSE[NTC_MAX_MIPS]{};
+        float perMipPSNR[NTC_MAX_MIPS]{};
 
         for (int mipLevel = 0; mipLevel < int(textureDesc.mipLevels); ++mipLevel)
         {
@@ -614,17 +625,21 @@ bool BlockCompressAndSaveGraphicsTextures(
             uint32_t const mipWidthBlocks = (mipWidth + 3) / 4;
             uint32_t const mipHeightBlocks = (mipHeight + 3) / 4;
 
-            uint8_t const bcQuality = userProvidedBcQuality >= 0
-                ? uint8_t(userProvidedBcQuality)
-                : textureMetadata->GetBlockCompressionQuality();
-
             ntc::MakeBlockCompressionComputePassParameters params;
             params.srcRect.width = int(mipWidth);
             params.srcRect.height = int(mipHeight);
             params.dstFormat = bcFormat;
             params.alphaThreshold = alphaThreshold;
-            params.texture = textureMetadata;
-            params.quality = bcQuality;
+            if (!modeBufferTasks.empty())
+            {
+                params.modeBufferSource = modeBufferTasks[mipLevel].pipeline != BufferLoadingPipeline::None
+                    ? ntc::BlockCompressionModeBufferSource::TextureSet
+                    : ntc::BlockCompressionModeBufferSource::None;
+                params.modeBufferByteOffset = modeBufferTasks[mipLevel].finalBufferRange.byteOffset;
+            }
+            params.modeBufferInfo.textureSet.texture = textureMetadata;
+            params.modeBufferInfo.textureSet.mipLevel = mipLevel;
+
             ntc::ComputePassDesc computePass{};
             ntcStatus = context->MakeBlockCompressionComputePass(params, &computePass);
             CHECK_NTC_RESULT("MakeBlockCompressionComputePass");
@@ -642,7 +657,9 @@ bool BlockCompressAndSaveGraphicsTextures(
                 commandList->beginTimerQuery(timerQuery);
 
                 if (!blockCompressionPass.ExecuteComputePass(commandList, computePass,
-                    textureResources.color, nvrhi::Format::UNKNOWN, mipLevel, textureResources.blocks, 0, nullptr))
+                    textureResources.color, nvrhi::Format::UNKNOWN, mipLevel,
+                    params.modeBufferSource != ntc::BlockCompressionModeBufferSource::None ? modeBuffer : nullptr,
+                    textureResources.blocks, 0))
                 {
                     commandList->close();
                     return false;
@@ -662,15 +679,12 @@ bool BlockCompressAndSaveGraphicsTextures(
             }
             
             float const compressTimeSeconds = Median(iterationTimes);
-            mipChainCompressionTimeMs += compressTimeSeconds * 1e3f;
+            perMipCompressionTimeMs[mipLevel] = compressTimeSeconds * 1e3f;
 
-            // Compute and print out compression PSNR for mip 0 only (for simplicity/performance)
-            if (mipLevel == 0)
-            {
-                ComputeBlockCompressedImageError(context, compareImagesPass, device, commandList, textureResources,
-                    mipWidth, mipHeight, false, useAlphaThreshold, alphaThreshold, useMSLE,
-                    &mipZeroMSE, &mipZeroPSNR, bcFormatDef->channels);
-            }
+            // Compute the compression PSNR
+            ComputeBlockCompressedImageError(context, compareImagesPass, device, commandList, textureResources,
+                mipWidth, mipHeight, mipLevel, false, useAlphaThreshold, alphaThreshold, useMSLE,
+                &perMipMSE[mipLevel], &perMipPSNR[mipLevel], bcFormatDef->channels);
 
             size_t rowPitch = 0;
             uint8_t const* mappedData = static_cast<uint8_t const*>(device->mapStagingTexture(
@@ -699,16 +713,33 @@ bool BlockCompressAndSaveGraphicsTextures(
 
         outputFile.Close();
 
-        char errorString[16];
-        if (useMSLE)
-            snprintf(errorString, sizeof errorString, "RMSLE: %.4f", sqrtf(mipZeroMSE));
-        else
-            snprintf(errorString, sizeof errorString, "PSNR: %.2f dB", mipZeroPSNR);
-        
-        printf("Saved image '%s': %dx%d pixels, %d mips, %s (Encoding time: %.2f ms, MIP0 %s)\n",
+        printf("Saved image '%s': %dx%d pixels, %d mips, %s:\n",
             outputFileName.c_str(), textureDesc.width, textureDesc.height, textureDesc.mipLevels,
-            ntc::BlockCompressedFormatToString(bcFormatDef->ntcFormat),
-            mipChainCompressionTimeMs, errorString);
+            ntc::BlockCompressedFormatToString(bcFormatDef->ntcFormat));
+
+        for (int mipLevel = 0; mipLevel < int(textureDesc.mipLevels); ++mipLevel)
+        {
+            printf("  MIP %2d ", mipLevel);
+            if (useMSLE)
+            {
+                printf("MSLE: %.6f", sqrtf(perMipMSE[mipLevel]));
+            }
+            else
+            {
+                printf("PSNR: %.2f dB", perMipPSNR[mipLevel]);
+            }
+            if (benchmarkIterations > 1)
+            {
+                printf(", Encoding time: %.2f ms", perMipCompressionTimeMs[mipLevel]);
+            }
+            if (bcFormat == ntc::BlockCompressedFormat::BC7)
+            {
+                bool const useModeBuffer = !modeBufferTasks.empty() &&
+                    modeBufferTasks[mipLevel].pipeline != BufferLoadingPipeline::None;
+                printf(", Accelerated: %s", useModeBuffer ? "YES" : "NO");
+            }
+            printf("\n");
+        }
     }
 
     return true;
@@ -738,10 +769,6 @@ bool OptimizeBlockCompression(
     if (!anyBC7Textures)
         return true;
 
-    nvrhi::TimerQueryHandle timerQuery = device->createTimerQuery();
-    if (!timerQuery)
-        return false;
-
     GraphicsBlockCompressionPass blockCompressionPass(device, true);
     if (!blockCompressionPass.Init())
         return false;
@@ -749,6 +776,11 @@ bool OptimizeBlockCompression(
     GraphicsImageDifferencePass compareImagesPass(device);
     if (!compareImagesPass.Init())
         return false;
+    
+    ntc::TextureSetDesc const& textureSetDesc = textureSetMetadata->GetDesc();
+
+    nvrhi::BufferHandle modeBuffer;
+    std::vector<uint8_t> blockCompressedData;
 
     for (int textureIndex = 0; textureIndex < textureSetMetadata->GetTextureCount(); ++textureIndex)
     {
@@ -758,124 +790,145 @@ bool OptimizeBlockCompression(
 
         GraphicsResourcesForTexture const& textureResources = graphicsResources.perTexture[textureIndex];
 
-        nvrhi::TextureDesc const& textureDesc = textureResources.color->getDesc();
-        
-        ntc::MakeBlockCompressionComputePassParameters compressionParams;
-        compressionParams.srcRect.width = int(textureDesc.width);
-        compressionParams.srcRect.height = int(textureDesc.height);
-        compressionParams.dstFormat = textureMetadata->GetBlockCompressedFormat();
-        compressionParams.writeAccelerationData = true;
-        compressionParams.texture = textureMetadata;
-        ntc::ComputePassDesc blockCompressionComputePass;
-        ntc::Status ntcStatus = context->MakeBlockCompressionComputePass(compressionParams, &blockCompressionComputePass);
-        CHECK_NTC_RESULT("MakeBlockCompressionComputePass");
-        
-        commandList->open();
-        commandList->clearBufferUInt(graphicsResources.accelerationBuffer, 0);
-        commandList->beginTimerQuery(timerQuery);
-
-        if (!blockCompressionPass.ExecuteComputePass(commandList, blockCompressionComputePass,
-            textureResources.color, nvrhi::Format::UNKNOWN, /* inputMipLevel = */ 0,
-            textureResources.blocks, /* outputMipLevel = */ 0, graphicsResources.accelerationBuffer))
+        for (int mipLevel = 0; mipLevel < textureSetDesc.mips; ++mipLevel)
         {
-            commandList->close();
-            return false;
-        }
-        
-        commandList->endTimerQuery(timerQuery);
-        commandList->copyBuffer(graphicsResources.accelerationStagingBuffer, 0, graphicsResources.accelerationBuffer, 0,
-            ntc::BlockCompressionAccelerationBufferSize);
-        commandList->close();
+            int mipWidth = std::max(textureSetDesc.width >> mipLevel, 1);
+            int mipHeight = std::max(textureSetDesc.height >> mipLevel, 1);
+            int mipWidthInBlocks = (mipWidth + 3) / 4;
+            int mipHeightInBlocks = (mipHeight + 3) / 4;
 
-        device->executeCommandList(commandList);
-        device->waitForIdle();
-        device->runGarbageCollection();
-        
-        float basePassTimeSeconds = device->getTimerQueryTime(timerQuery);
+            // First pass - compress without the mode buffer, doing an exhaustive mode search for each block
 
-        void* accelerationData = device->mapBuffer(graphicsResources.accelerationStagingBuffer, nvrhi::CpuAccessMode::Read);
-        if (!accelerationData)
-            return false;
-
-        ntcStatus = textureMetadata->SetBlockCompressionAccelerationData(accelerationData,
-            ntc::BlockCompressionAccelerationBufferSize);
-
-        device->unmapBuffer(graphicsResources.accelerationStagingBuffer);
-
-        CHECK_NTC_RESULT("SetBlockCompressionAccelerationData");
-
-        float basePassPsnr;
-        ComputeBlockCompressedImageError(context, compareImagesPass, device, commandList, textureResources, 
-            textureDesc.width, textureDesc.height, false, false, 0.f, false, nullptr, &basePassPsnr);
-        
-        printf("Optimizing texture '%s'...\n", textureMetadata->GetName());
-        printf("  MAX PSNR: %5.2f dB, t = %.3f ms\n", basePassPsnr, basePassTimeSeconds * 1e3f);
-
-        int qualityLow = 0;
-        int qualityHigh = 255;
-        float const targetPsnr = basePassPsnr - psnrThreshold;
-        float psnrLow = 0.f; // we don't really know but assume it's bad for q=0
-        float psnrHigh = basePassPsnr;
-
-        while (qualityLow + 1 < qualityHigh)
-        {
-            int quality = (qualityLow + qualityHigh) / 2;
-
-            compressionParams.writeAccelerationData = false;
-            compressionParams.quality = uint8_t(quality);
-            ntcStatus = context->MakeBlockCompressionComputePass(compressionParams, &blockCompressionComputePass);
+            ntc::MakeBlockCompressionComputePassParameters compressionParams;
+            compressionParams.srcRect.width = mipWidth;
+            compressionParams.srcRect.height = mipHeight;
+            compressionParams.dstFormat = textureMetadata->GetBlockCompressedFormat();
+            ntc::ComputePassDesc blockCompressionComputePass;
+            ntc::Status ntcStatus = context->MakeBlockCompressionComputePass(compressionParams, &blockCompressionComputePass);
             CHECK_NTC_RESULT("MakeBlockCompressionComputePass");
-
+            
             commandList->open();
-            commandList->beginTimerQuery(timerQuery);
 
             if (!blockCompressionPass.ExecuteComputePass(commandList, blockCompressionComputePass,
-                textureResources.color, nvrhi::Format::UNKNOWN, /* inputMipLevel = */ 0,
-                textureResources.blocks, /* outputMipLevel = */ 0, graphicsResources.accelerationBuffer))
+                textureResources.color, nvrhi::Format::UNKNOWN, mipLevel,
+                /* modeBuffer = */ nullptr,
+                textureResources.blocks, /* outputMipLevel = */ 0))
             {
                 commandList->close();
                 return false;
             }
             
-            commandList->endTimerQuery(timerQuery);
+            commandList->copyTexture(textureResources.stagingBlocks, nvrhi::TextureSlice(),
+                textureResources.blocks, nvrhi::TextureSlice());
+
+            commandList->close();
+
+            device->executeCommandList(commandList);
+            device->waitForIdle();
+            device->runGarbageCollection();
+            
+            // Read the block-compressed data back into CPU memory
+
+            size_t rowPitch = 0;
+            size_t blockDataSize = 0;
+            {
+                void const* mappedBlockData = device->mapStagingTexture(
+                    textureResources.stagingBlocks, nvrhi::TextureSlice(), nvrhi::CpuAccessMode::Read, &rowPitch);
+                if (!mappedBlockData)
+                    return false;
+
+                // Copy the block-compressed data into a CPU buffer for more efficient access
+                // and for later validation of the optimized compression pass.
+                blockDataSize = rowPitch * mipHeightInBlocks;
+                blockCompressedData.resize(blockDataSize);
+                memcpy(blockCompressedData.data(), mappedBlockData, blockDataSize);
+
+                device->unmapStagingTexture(textureResources.stagingBlocks);
+            }
+
+            // Use the block-compressed data to fill the BC7 mode buffer
+
+            ntcStatus = textureMetadata->MakeAndStoreBC7ModeBuffer(mipLevel, mipWidthInBlocks, mipHeightInBlocks,
+                blockCompressedData.data(), blockDataSize, rowPitch);
+
+            CHECK_NTC_RESULT("MakeAndStoreBC7ModeBuffer");
+
+            // Retrieve the mode buffer data we just created above
+
+            void const* modeBufferData = nullptr;
+            size_t modeBufferSize = 0;
+            textureMetadata->GetBC7ModeBuffer(mipLevel, &modeBufferData, &modeBufferSize);
+            
+            if (modeBufferData == nullptr || modeBufferSize == 0)
+            {
+                fprintf(stderr, "Failed to retrieve BC7 mode buffer for texture '%s' mip %d after optimization.\n",
+                    textureResources.name.c_str(), mipLevel);
+                return false;
+            }
+            
+            if (!modeBuffer)
+            {
+                nvrhi::BufferDesc modeBufferDesc = nvrhi::BufferDesc()
+                    .setDebugName("BC7 Mode Buffer")
+                    .setByteSize(modeBufferSize)
+                    .setCanHaveRawViews(true)
+                    .enableAutomaticStateTracking(nvrhi::ResourceStates::ShaderResource);
+                
+                modeBuffer = device->createBuffer(modeBufferDesc);
+                if (!modeBuffer)
+                    return false;
+            }
+
+            // We create the mode buffer for mip 0, and reuse it for all mips in the pass.
+            // The mip 0 buffer is always larger than the others, so this is safe.
+            assert(modeBuffer->getDesc().byteSize >= modeBufferSize);
+
+            // Second pass - compress using the mode buffer for validation
+
+            compressionParams.modeBufferSource = ntc::BlockCompressionModeBufferSource::TextureSet;
+            compressionParams.modeBufferInfo.textureSet.texture = textureMetadata;
+            compressionParams.modeBufferInfo.textureSet.mipLevel = mipLevel;
+            ntcStatus = context->MakeBlockCompressionComputePass(compressionParams, &blockCompressionComputePass);
+            CHECK_NTC_RESULT("MakeBlockCompressionComputePass #2");
+
+            commandList->open();
+            commandList->writeBuffer(modeBuffer, modeBufferData, modeBufferSize);
+
+            if (!blockCompressionPass.ExecuteComputePass(commandList, blockCompressionComputePass,
+                textureResources.color, nvrhi::Format::UNKNOWN, mipLevel,
+                modeBuffer,
+                textureResources.blocks, /* outputMipLevel = */ 0))
+            {
+                commandList->close();
+                return false;
+            }
+
+            commandList->copyTexture(textureResources.stagingBlocks, nvrhi::TextureSlice(),
+                textureResources.blocks, nvrhi::TextureSlice());
+
             commandList->close();
             device->executeCommandList(commandList);
-            
-            float psnr;
-            ComputeBlockCompressedImageError(context, compareImagesPass, device, commandList, textureResources,
-                textureDesc.width, textureDesc.height, false, false, 0.f, false, nullptr, &psnr);
-            
-            float optimizedPassTimeSeconds = device->getTimerQueryTime(timerQuery);
+            device->waitForIdle();
+            device->runGarbageCollection();
 
-            printf("q=%3d PSNR: %5.2f dB, time: %.3f ms\n", quality, psnr, optimizedPassTimeSeconds * 1e3f);
+            // Map the compressed data and compare against the original compression output.
+            // They should match exactly.
 
-            if (psnr < targetPsnr)
             {
-                qualityLow = quality;
-                psnrLow = psnr;
-            }
-            else
-            {
-                qualityHigh = quality;
-                psnrHigh = psnr;
-            }
-        }
+                void const* mappedBlockData = device->mapStagingTexture(
+                    textureResources.stagingBlocks, nvrhi::TextureSlice(), nvrhi::CpuAccessMode::Read, &rowPitch);
+                if (!mappedBlockData)
+                    return false;
 
-        int selectedQuality;
-        float selectedPsnr;
-        if (psnrLow >= targetPsnr)
-        {
-            selectedQuality = qualityLow;
-            selectedPsnr = psnrLow;
-        }
-        else
-        {
-            selectedQuality = qualityHigh;
-            selectedPsnr = psnrHigh;
-        }
+                if (memcmp(mappedBlockData, blockCompressedData.data(), blockDataSize) != 0)
+                {
+                    fprintf(stderr, "Warning: Optimized BC7 compression produced different data for texture '%s' mip %d.\n",
+                        textureResources.name.c_str(), mipLevel);
+                }
 
-        printf("Selected q=%d with PSNR loss of %.2f dB.\n", selectedQuality, basePassPsnr - selectedPsnr);
-        textureMetadata->SetBlockCompressionQuality(uint8_t(selectedQuality));
+                device->unmapStagingTexture(textureResources.stagingBlocks);
+            }
+        }
     }
     
     return true;
@@ -946,7 +999,8 @@ bool ComputePsnrForBlockCompressedTextureSet(
         // Compress the color texture into the block texture
         if (!blockCompressionPass.ExecuteComputePass(commandList, blockCompressionComputePass,
             textureResources.color, nvrhi::Format::UNKNOWN, /* inputMipLevel = */ 0,
-            textureResources.blocks, /* outputMipLevel = */ 0, nullptr))
+            /* modeBuffer = */ nullptr,
+            textureResources.blocks, /* outputMipLevel = */ 0))
         {
             commandList->close();
             return false;

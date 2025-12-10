@@ -24,6 +24,7 @@ Argument | Description
 `--loadManifest <file>` | Load images described by a [manifest file](Manifest.md) into a texture set.
 `--loadCompressed <file>` | Load a compressed texture set from a file.
 `-i <path>`, `--saveImages <path>` | Save all images from the texture set into a directory. See also `--imageFormat` and `--bcFormat`.
+`--saveManifest <file>` | Save the final manifest into a JSON file. Useful to generate a template manifest from a directory to edit it later.
 `--saveMips` | Save all mip levels with the images when processing `--saveImages`. Also affects DDS files produced for BCn textures.
 `-o`, `--saveCompressed <file>` | Save the compressed texture set into a file.
 `-g`, `--generateMips` | Generate all mip levels (1 and above) for the texture set from mip 0.
@@ -31,6 +32,7 @@ Argument | Description
 `-c`, `--compress` | Perform NTC compression of the texture set.
 `-D`, `--decompress` | Perform NTC decompression of the previously compressed or loaded texture set. <br> The decompression method depends on other parameters, default is CUDA. <br> The `--decompress` parameter is implied if decompression is required for other actions.
 `--optimizeBC` | Perform BC7 transcoding optimization if any textures are set to use BC7.
+`--readManifestFromStdin` | Load channel images using a [JSON manifest](Manifest.md) passed through standard input (stdin).
 `--listCudaDevices` | Prints out the list of CUDA devices available in the system. Use `--cudaDevice <N>` to select a specific device.
 `--listAdapters` | Prints out the list of Vulkan or DX12 adapters available in the system, requires `--vk` or `--dx12`. <br> Use `--adapter <N>` to select a specific one. When using CUDA operations, a matching adapter is selected automatically.
 

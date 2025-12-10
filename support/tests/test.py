@@ -10,6 +10,7 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
+import argparse
 import unittest
 import os
 import sys
@@ -24,7 +25,17 @@ try:
 except ImportError:
     _OPEN_EXR_SUPPORTED = False
 
-_COOPVEC_SUPPORTED = False
+_CUDA_DEVICE = None
+_ADAPTER_VK = None
+_ADAPTER_DX12 = None
+_COOPVEC_SUPPORTED_VK = False
+_COOPVEC_SUPPORTED_DX12 = False
+
+def _isCoopVecSupported(api):
+    if api == 'vk':
+        return _COOPVEC_SUPPORTED_VK
+    else:
+        return _COOPVEC_SUPPORTED_DX12
 
 FL_DP4A = 0
 FL_COOPVEC = 1
@@ -117,12 +128,22 @@ class TestCase(unittest.TestCase):
 
     def assertFileExists(self, path):
         if not os.path.exists(path):
-            raise self.failureException(f"'{path}' does not exist")
+            self.fail(f"File '{path}' does not exist")
         
     def assertBetween(self, value, low, high):
         if value < low or value > high:
-            raise self.failureException(f'{value} is not between {low} and {high}')
+            self.fail(f'{value} is not between {low} and {high}')
+    
+    def assertFilesEqual(self, path1, path2):
+        self.assertFileExists(path1)
+        self.assertFileExists(path2)
 
+        with open(path1, 'rb') as f1, open(path2, 'rb') as f2:
+            data1 = f1.read()
+            data2 = f2.read()
+            if data1 != data2:
+                self.fail(f"Files '{path1}' and '{path2}' differ")
+                sys.exit(1)
 
     def compareOutputImages(self, sourceDir, decompressedDir, expectedPsnrValues, toleranceDb, ignoreExtraChannels = False):
 
@@ -149,28 +170,42 @@ class TestCase(unittest.TestCase):
 
 class DescribeTestCase(TestCase):
 
+    def __init__(self, api: str, noCoopVec: bool) -> None:
+        super().__init__()
+        self.api = api
+        self.noCoopVec = noCoopVec
+
     def __str__(self):
-        return 'Describe'
+        return f'Describe ({self.api})'
         
     def runTest(self):
+        if self.api == 'dx12' and os.name != 'nt':
+            self.skipTest('DX12 is only available on Windows')
+
         ntcFileName = os.path.join(testFilesDir, f'PavingStones070_5bpp.ntc')
 
         args = ntc.Arguments(
             tool=self.tool,
+            cudaDevice=_CUDA_DEVICE,
+            adapter=_ADAPTER_VK if self.api == 'vk' else _ADAPTER_DX12,
             loadCompressed=ntcFileName,
             describe=True,
-            graphicsApi='vk'
+            graphicsApi=self.api,
+            noCoopVec=self.noCoopVec
         )
 
         result = ntc.run(args)
 
         self.assertEqual(result.dimensions, (2048, 2048))
         self.assertEqual(result.channels, 10)
-        self.assertEqual(result.mipLevels, 1)
+        self.assertEqual(result.mipLevels, 12)
         
-        global _COOPVEC_SUPPORTED
-        _COOPVEC_SUPPORTED = 'CoopVec' in result.gpuFeatures
-
+        if self.api == 'vk':
+            global _COOPVEC_SUPPORTED_VK
+            _COOPVEC_SUPPORTED_VK = 'CoopVec' in result.gpuFeatures
+        else:
+            global _COOPVEC_SUPPORTED_DX12
+            _COOPVEC_SUPPORTED_DX12 = 'CoopVec' in result.gpuFeatures
 
 class CompressionTestCase(TestCase):
 
@@ -183,6 +218,7 @@ class CompressionTestCase(TestCase):
         
         args = ntc.Arguments(
             tool=self.tool,
+            cudaDevice=_CUDA_DEVICE,
             loadImages=sourceMaterialDir,
             compress=True,
             decompress=True,
@@ -205,6 +241,7 @@ class CompressionTestCase(TestCase):
 
         args = ntc.Arguments(
             tool=self.tool,
+            cudaDevice=_CUDA_DEVICE,
             loadCompressed=ntcFileName,
             decompress=True,
             saveImages=decompressedDir,
@@ -227,6 +264,7 @@ class DeterminismTestCase(TestCase):
 
         args1 = ntc.Arguments(
             tool=self.tool,
+            cudaDevice=_CUDA_DEVICE,
             loadImages=sourceMaterialDir,
             compress=True,
             decompress=True,
@@ -241,6 +279,7 @@ class DeterminismTestCase(TestCase):
 
         args2 = ntc.Arguments(
             tool=self.tool,
+            cudaDevice=_CUDA_DEVICE,
             loadImages=sourceMaterialDir,
             compress=True,
             decompress=True,
@@ -256,13 +295,7 @@ class DeterminismTestCase(TestCase):
         self.assertBetween(result1.overallPsnr, 27, 30)
         self.assertBetween(result2.overallPsnr, result1.overallPsnr - 0.05, result1.overallPsnr + 0.05)
 
-        self.assertTrue(os.path.exists(ntcFileName1))
-        self.assertTrue(os.path.exists(ntcFileName2))
-
-        with open(ntcFileName1, 'rb') as f1, open(ntcFileName2, 'rb') as f2:
-            ntcData1 = f1.read()
-            ntcData2 = f2.read()
-            self.assertEqual(ntcData1, ntcData2)
+        self.assertFilesEqual(ntcFileName1, ntcFileName2)
 
 class HdrCompressionTestCase(TestCase):
 
@@ -276,6 +309,7 @@ class HdrCompressionTestCase(TestCase):
         
         args = ntc.Arguments(
             tool=self.tool,
+            cudaDevice=_CUDA_DEVICE,
             loadImages=sourceMaterialDir,
             compress=True,
             decompress=True,
@@ -301,6 +335,7 @@ class HdrCompressionTestCase(TestCase):
 
         args = ntc.Arguments(
             tool=self.tool,
+            cudaDevice=_CUDA_DEVICE,
             loadCompressed=ntcFileName,
             decompress=True,
             saveImages=decompressedDir,
@@ -330,12 +365,15 @@ class DecompressionTestCase(TestCase):
         self.featureLevel = featureLevel
 
     def __str__(self):
+        if self.api == 'cuda':
+            return 'Decompression (cuda)'
+        
         return f'Decompression ({self.api}, {FL_STRINGS[self.featureLevel]})'
 
     def runTest(self):
         if self.api == 'dx12' and os.name != 'nt':
             self.skipTest('DX12 is only available on Windows')
-        if self.featureLevel >= FL_COOPVEC and not _COOPVEC_SUPPORTED:
+        if self.featureLevel >= FL_COOPVEC and not _isCoopVecSupported(self.api):
             self.skipTest('CoopVec is not supported')
 
         sourceMaterialDir = os.path.join(sourceDir, 'PavingStones070')
@@ -346,6 +384,8 @@ class DecompressionTestCase(TestCase):
 
         args = ntc.Arguments(
             tool=self.tool,
+            cudaDevice=_CUDA_DEVICE,
+            adapter=_ADAPTER_VK if self.api == 'vk' else _ADAPTER_DX12,
             loadCompressed=ntcFileName,
             decompress=True,
             saveImages=decompressedDir,
@@ -370,21 +410,98 @@ class DecompressionTestCase(TestCase):
             
         self.compareOutputImages(sourceMaterialDir, decompressedDir, expectedPsnr, toleranceDb=1.5, ignoreExtraChannels=not isCuda)
         
+class BlockCompressionTestCase(TestCase):
+
+    def __init__(self, api: str) -> None:
+        super().__init__()
+        self.api = api
+
+    def __str__(self):
+        return f'BC Compression ({self.api})'
+
+    def runTest(self):
+        if self.api == 'dx12' and os.name != 'nt':
+            self.skipTest('DX12 is only available on Windows')
+
+        ntcFileName = os.path.join(testFilesDir, 'PavingStones070_5bpp.ntc')
+        referenceImageDir = os.path.join(testFilesDir, 'PavingStones070_5bpp_DDS')
+        decompressedDir = os.path.join(scratchDir, 'output_dds')
+    
+        args = ntc.Arguments(
+            tool=self.tool,
+            cudaDevice=_CUDA_DEVICE,
+            adapter=_ADAPTER_VK if self.api == 'vk' else _ADAPTER_DX12,
+            loadCompressed=ntcFileName,
+            decompress=True,
+            saveImages=decompressedDir,
+            saveMips=True,
+            noCoopVec=True,
+            graphicsApi=self.api
+        )
+
+        result = ntc.run(args)
+        
+        # TODO: The PSNR values should be much higher than these thresholds.
+        # Currently, they are 'inf' on Vulkan (because the reference files were encoded on Vulkan)
+        # and just above these threshold values on DX12 without CoopVec.
+        # With CoopVec, they are lower/worse, but this is sort of expected because CoopVec uses FP8 math instead of INT8.
+        #
+        # Also note: we're not testing all files here, just a representative subset using different BC formats.
+        outputFileNamesAndTolerances = [
+            ('AmbientOcclusion.dds', 49.0), # BC1
+            ('Color.dds', 44.0),            # BC7
+            ('Roughness.dds', 50.0)         # BC4
+        ]
+
+        inputFiles = []
+        for name, tolerance in outputFileNamesAndTolerances:
+            referenceFilePath = os.path.join(referenceImageDir, name)
+            decompressedFilePath = os.path.join(decompressedDir, name)
+            self.assertFileExists(referenceFilePath)
+            self.assertFileExists(decompressedFilePath)
+            inputFiles.append(referenceFilePath)
+            inputFiles.append(decompressedFilePath)
+
+        compareResults = ntc.run_imagediff(ntc.get_default_imagediff_path(), inputFiles)
+        mipLevels = 12
+        self.assertEqual(len(compareResults), len(outputFileNamesAndTolerances) * mipLevels)
+
+        for pair, mipLevel, mse, psnr in compareResults:
+            name, tolerance = outputFileNamesAndTolerances[pair]
+            if psnr < tolerance:
+                self.fail(f'Image mismatch for {name} at MIP {mipLevel}: MSE={mse}, PSNR={psnr} dB, Expected PSNR >= {tolerance} dB')
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--noCuda', action = 'store_true', help = 'Disable CUDA tests')
+    parser.add_argument('--cudaDevice', metavar = 'N', type = int, help = 'CUDA device index')
+    parser.add_argument('--adapterVK', metavar = 'N', type = int, help = 'Graphics adapter index for Vulkan')
+    parser.add_argument('--adapterDX12', metavar = 'N', type = int, help = 'Graphics adapter index for DX12')
+    parser.add_argument('--noCoopVecVK', action = 'store_true', help = 'Disable CoopVec on VK')
+    parser.add_argument('--noCoopVecDX12', action = 'store_true', help = 'Disable CoopVec on DX12')
+    args = parser.parse_args()
+
+    gDevice = args.cudaDevice
+    _ADAPTER_VK = args.adapterVK
+    _ADAPTER_DX12 = args.adapterDX12
+
     suite = unittest.TestSuite()
     # Describe should go first because it also queries the GPU capabilities
-    suite.addTest(DescribeTestCase())
-    suite.addTest(CompressionTestCase())
-    suite.addTest(DeterminismTestCase())
-    suite.addTest(HdrCompressionTestCase())
+    suite.addTest(DescribeTestCase('vk', args.noCoopVecVK))
+    suite.addTest(DescribeTestCase('dx12', args.noCoopVecDX12))
+    if not args.noCuda:
+        suite.addTest(CompressionTestCase())
+        suite.addTest(DeterminismTestCase())
+        suite.addTest(HdrCompressionTestCase())
 
     for api in ('cuda', 'vk', 'dx12'):
         if api == 'cuda':
-            suite.addTest(DecompressionTestCase(api=api, featureLevel=FL_DP4A))
+            if not args.noCuda:
+                suite.addTest(DecompressionTestCase(api=api, featureLevel=FL_DP4A))
         else:
             for featureLevel in (FL_DP4A, FL_COOPVEC):
                 suite.addTest(DecompressionTestCase(api=api, featureLevel=featureLevel))
-
+            suite.addTest(BlockCompressionTestCase(api=api))
+    
     runner = unittest.TextTestRunner(verbosity=2)
     runner.run(suite)

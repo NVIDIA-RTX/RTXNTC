@@ -70,7 +70,8 @@ enum class ToolInputType
     None,
     Directory,
     CompressedTextureSet,
-    Manifest,
+    ManifestFile,
+    ManifestStdin,
     Images,
     Mixed
 };
@@ -94,6 +95,10 @@ void GenerateManifestFromFileList(std::vector<const char*> const& files, Manifes
     
 bool ReadManifestFromFile(const char* fileName, Manifest& outManifest,
     std::string& outError);
+
+bool ReadManifestFromStdin(Manifest& outManifest, std::string& outError);
+
+bool WriteManifestToFile(const char* fileName, const Manifest& manifest, std::string& outError);
 
 bool IsSupportedImageFileExtension(std::string const& extension);
 

@@ -1,6 +1,8 @@
 assets/materials
 assets/models
 bin/windows-x64/d3d12/*.dll
+bin/windows-x64/dstorage.dll
+bin/windows-x64/dstoragecore.dll
 bin/windows-x64/libntc.dll
 bin/windows-x64/ntc-*.exe
 bin/windows-x64/nvngx_dlss.dll

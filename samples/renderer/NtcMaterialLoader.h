@@ -16,9 +16,11 @@
 #include <nvrhi/nvrhi.h>
 #include <filesystem>
 #include <unordered_map>
+#include <ntc-utils/DeviceUtils.h>
 
 #include "feedbackmanager/include/FeedbackManager.h"
 
+struct TextureTranscodeTask;
 struct NtcMaterial;
 class GraphicsDecompressionPass;
 class GraphicsBlockCompressionPass;
@@ -59,7 +61,7 @@ public:
         : m_device(device)
     { }
     
-    bool Init(bool enableCoopVec, nvrhi::ITexture* dummyTexture);
+    bool Init(bool enableCoopVec, bool enableGpuDeflate, bool debug, nvrhi::ITexture* dummyTexture);
 
     bool IsCooperativeVectorSupported() const { return m_coopVec; }
 
@@ -78,6 +80,8 @@ private:
 
     ntc::ContextWrapper m_ntcContext;
 
+    std::unique_ptr<GDeflateFeatures> m_gdeflateFeatures;
+
     bool m_coopVec = false;
     WeightTypeHistogram m_weightTypeHistogram;
 
@@ -95,7 +99,7 @@ private:
     uint32_t m_texTileBlocksRGBAOffset = 0;
     std::vector<nvrhi::TextureHandle> m_texTranscodeTiles;
 
-    bool TranscodeMaterial(ntc::IStream* ntcFile,
+    bool TranscodeMaterial(ntc::IContext* context, ntc::IStream* ntcFile,
         ntc::ITextureSetMetadata* textureSetMetadata, NtcMaterial& material, nvrhi::ICommandList* commandList,
         bool enableBlockCompression);
 
@@ -104,4 +108,8 @@ private:
 
     bool PrepareFeedbackMaterial(std::shared_ptr<nvfeedback::FeedbackManager> feedbackManager,
         ntc::ITextureSetMetadata* textureSetMetadata, NtcMaterial& material, bool enableBlockCompression);
+
+    bool CreateAndLoadModeBufferForTexture(ntc::IContext* ntcContext, ntc::IStream* ntcFile,
+        ntc::ITextureSetMetadata* textureSetMetadata, TextureTranscodeTask& transcodeTask,
+        nvrhi::ICommandList* commandList, std::string const& materialTextureName);
 };

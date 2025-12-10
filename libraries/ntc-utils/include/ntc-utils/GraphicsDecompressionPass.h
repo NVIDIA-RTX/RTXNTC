@@ -17,6 +17,8 @@
 #include <unordered_map>
 #include <donut/engine/BindingCache.h>
 
+struct GDeflateFeatures;
+
 class GraphicsDecompressionPass
 {
 public:
@@ -30,8 +32,9 @@ public:
 
     void WriteDescriptor(nvrhi::BindingSetItem item);
 
-    bool SetLatentDataFromTextureSet(nvrhi::ICommandList* commandList, ntc::IStream* inputStream,
-        ntc::ITextureSetMetadata* textureSetMetadata);
+    bool SetLatentDataFromTextureSet(nvrhi::ICommandList* commandList, ntc::IContext* context,
+        GDeflateFeatures* gdeflateFeatures,
+        ntc::IStream* inputStream, ntc::ITextureSetMetadata* textureSetMetadata);
 
     void SetLatentTexture(nvrhi::ITexture* texture);
 

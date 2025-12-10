@@ -28,6 +28,11 @@ extern "C"
 #if NTC_WITH_DX12
 static bool g_dx12DeveloperModeEnabled = false;
 #endif
+#if NTC_WITH_VULKAN
+static bool g_vkMemoryDecompressionSupported = false;
+#endif
+
+constexpr bool DirectStorageForceCPUDecompression = false;
 
 bool IsDX12DeveloperModeEnabled()
 {
@@ -42,6 +47,7 @@ void SetNtcGraphicsDeviceParameters(
     donut::app::DeviceCreationParameters& deviceParams,
     nvrhi::GraphicsAPI graphicsApi,
     bool enableSharedMemory,
+    bool enableDX12ExperimentalFeatures,
     char const* windowTitle)
 {
 #if NTC_WITH_VULKAN
@@ -56,6 +62,7 @@ void SetNtcGraphicsDeviceParameters(
 #endif
         }
         deviceParams.optionalVulkanDeviceExtensions.push_back(VK_NV_COOPERATIVE_VECTOR_EXTENSION_NAME);
+        deviceParams.optionalVulkanDeviceExtensions.push_back(VK_NV_MEMORY_DECOMPRESSION_EXTENSION_NAME);
         deviceParams.optionalVulkanDeviceExtensions.push_back(VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME);
         deviceParams.optionalVulkanDeviceExtensions.push_back(VK_EXT_SHADER_REPLICATED_COMPOSITES_EXTENSION_NAME);
         deviceParams.optionalVulkanDeviceExtensions.push_back(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
@@ -75,7 +82,10 @@ void SetNtcGraphicsDeviceParameters(
         static VkPhysicalDeviceVulkan13Features vulkan13Features{};
         vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
         vulkan13Features.pNext = &vulkan12Features;
-        deviceParams.physicalDeviceFeatures2Extensions = &vulkan13Features;
+        static VkPhysicalDeviceMemoryDecompressionFeaturesNV memoryDecompressionFeatures{};
+        memoryDecompressionFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_DECOMPRESSION_FEATURES_NV;
+        memoryDecompressionFeatures.pNext = &vulkan13Features;
+        deviceParams.physicalDeviceFeatures2Extensions = &memoryDecompressionFeatures;
         
         // Set the callback to modify some bits in VkDeviceCreateInfo before creating the device
         deviceParams.deviceCreateInfoCallback = [](VkDeviceCreateInfo& info)
@@ -131,13 +141,22 @@ void SetNtcGraphicsDeviceParameters(
                 replicatedCompositesFeatures.pNext = nullptr;
                 pLast = pLast->pNext;
             }
+
+            // If memory decompression is supported, add a feature structure enabling it on the device
+            if (pLast && memoryDecompressionFeatures.memoryDecompression)
+            {
+                pLast->pNext = reinterpret_cast<VkBaseOutStructure*>(&memoryDecompressionFeatures);
+                memoryDecompressionFeatures.pNext = nullptr;
+                pLast = pLast->pNext;
+                g_vkMemoryDecompressionSupported = true;
+            }
         };
     }
 #endif
 
 #if NTC_WITH_DX12
     g_dx12DeveloperModeEnabled = false;
-    if (graphicsApi == nvrhi::GraphicsAPI::D3D12)
+    if (graphicsApi == nvrhi::GraphicsAPI::D3D12 && enableDX12ExperimentalFeatures)
     {
         UUID Features[] = { D3D12ExperimentalShaderModels, D3D12CooperativeVectorExperiment };
         HRESULT hr = D3D12EnableExperimentalFeatures(_countof(Features), Features, nullptr, nullptr);
@@ -161,6 +180,97 @@ void SetNtcGraphicsDeviceParameters(
         {
             g_dx12DeveloperModeEnabled = true;
         }
+    }
+#endif
+}
+
+#if NTC_WITH_DX12
+nvrhi::RefCountPtr<IDStorageQueue2> CreateDStorageQueue(ID3D12Device* d3dDevice, bool debugMode)
+{
+    DSTORAGE_CONFIGURATION config{};
+    config.DisableTelemetry = TRUE; // No, Microsoft, telemetry by default is not a good thing.
+    config.NumSubmitThreads = 1;
+    config.DisableGpuDecompression = DirectStorageForceCPUDecompression;
+    if (FAILED(DStorageSetConfiguration(&config)))
+        return nullptr;
+
+    nvrhi::RefCountPtr<IDStorageFactory> factory;
+    if (FAILED(DStorageGetFactory(IID_PPV_ARGS(&factory))))
+        return nullptr;
+    
+    if (debugMode)
+    {
+        factory->SetDebugFlags(DSTORAGE_DEBUG_SHOW_ERRORS | DSTORAGE_DEBUG_BREAK_ON_ERROR);
+    }
+    
+    DSTORAGE_QUEUE_DESC queueDesc{};
+    queueDesc.Device = d3dDevice;
+    queueDesc.Capacity = 1024;
+    queueDesc.SourceType = DSTORAGE_REQUEST_SOURCE_MEMORY;
+    queueDesc.Priority = DSTORAGE_PRIORITY_NORMAL;
+    queueDesc.Name = "NTC Decompression Queue";
+    nvrhi::RefCountPtr<IDStorageQueue2> queue;
+    if (FAILED(factory->CreateQueue(&queueDesc, IID_PPV_ARGS(&queue))))
+        return nullptr;
+
+    return queue;
+}
+#endif
+
+std::unique_ptr<GDeflateFeatures> InitGDeflate(nvrhi::IDevice* device, bool debugMode)
+{
+    auto features = std::make_unique<GDeflateFeatures>();
+
+#if NTC_WITH_DX12
+    if (device->getGraphicsAPI() == nvrhi::GraphicsAPI::D3D12)
+    {
+        ID3D12Device* d3dDevice = device->getNativeObject(nvrhi::ObjectTypes::D3D12_Device);
+        if (d3dDevice)
+        {
+            features->dstorageQueue = CreateDStorageQueue(d3dDevice, debugMode);
+            
+            if (features->dstorageQueue)
+            {
+                DSTORAGE_COMPRESSION_SUPPORT compressionSupport = features->dstorageQueue->GetCompressionSupport(
+                    DSTORAGE_COMPRESSION_FORMAT_GDEFLATE);
+                
+                DSTORAGE_COMPRESSION_SUPPORT minimalSupport = DirectStorageForceCPUDecompression
+                    ? DSTORAGE_COMPRESSION_SUPPORT_CPU_FALLBACK
+                    : (DSTORAGE_COMPRESSION_SUPPORT_GPU_FALLBACK |
+                       DSTORAGE_COMPRESSION_SUPPORT_GPU_OPTIMIZED);
+                if ((compressionSupport & minimalSupport) != 0)
+                {
+                    features->gpuDecompressionSupported = true;
+                }
+                
+                features->dstorageEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+            }
+
+            if (!features->gpuDecompressionSupported)
+            {
+                // Something failed above, release the resources
+                features->dstorageQueue = nullptr;
+            }
+        }
+    }
+#endif
+#if NTC_WITH_VULKAN
+    if (device->getGraphicsAPI() == nvrhi::GraphicsAPI::VULKAN)
+    {
+        features->gpuDecompressionSupported = g_vkMemoryDecompressionSupported;
+    }
+#endif
+
+    return features;
+}
+
+GDeflateFeatures::~GDeflateFeatures()
+{
+#if NTC_WITH_DX12
+    if (dstorageEvent)
+    {
+        CloseHandle(dstorageEvent);
+        dstorageEvent = NULL;
     }
 #endif
 }

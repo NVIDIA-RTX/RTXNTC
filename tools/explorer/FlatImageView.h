@@ -40,7 +40,7 @@ public:
     bool MouseButtonUpdate(int button, int action, int mods);
     bool MouseScrollUpdate(double xoffset, double yoffset);
 
-    void Reset();
+    void Reset(bool compareMode);
     void SetTextureSize(int width, int height, int mips);
     void SetTextures(nvrhi::ITexture* leftTexture, nvrhi::ITexture* rightTexture, int channels, bool sRGB);
     void SetViewport(dm::float2 origin, dm::float2 size);

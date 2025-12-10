@@ -20,11 +20,10 @@
 class GraphicsBlockCompressionPass
 {
 public:
-    GraphicsBlockCompressionPass(nvrhi::IDevice* device, bool useAccelerationBuffer, int maxConstantBufferVersions = 1)
+    GraphicsBlockCompressionPass(nvrhi::IDevice* device, int maxConstantBufferVersions = 1)
         : m_device(device)
-        , m_useAccelerationBuffer(useAccelerationBuffer)
-        , m_maxConstantBufferVersions(maxConstantBufferVersions)
         , m_bindingCache(device)
+        , m_maxConstantBufferVersions(maxConstantBufferVersions)
     { }
 
     bool Init();
@@ -33,7 +32,8 @@ public:
     // The output buffer must be large enough and have the canHaveUAVs and canHaveRawViews flags set.
     bool ExecuteComputePass(nvrhi::ICommandList* commandList, ntc::ComputePassDesc& computePass,
         nvrhi::ITexture* inputTexture, nvrhi::Format inputFormat, int inputMipLevel,
-        nvrhi::ITexture* outputTexture, int outputMipLevel, nvrhi::IBuffer* accelerationBuffer);
+        nvrhi::IBuffer* modeBuffer,
+        nvrhi::ITexture* outputTexture, int outputMipLevel);
 
     void ClearBindingSetCache() { m_bindingCache.Clear(); }
 
@@ -41,8 +41,8 @@ private:
     nvrhi::DeviceHandle m_device;
     std::unordered_map<const void*, nvrhi::ComputePipelineHandle> m_pipelines; // shader bytecode -> pipeline
     nvrhi::BindingLayoutHandle m_bindingLayout;
+    nvrhi::BindingLayoutHandle m_bindingLayoutWithModeBuffer;
     donut::engine::BindingCache m_bindingCache;
     nvrhi::BufferHandle m_constantBuffer;
-    bool m_useAccelerationBuffer;
     int m_maxConstantBufferVersions;
 };

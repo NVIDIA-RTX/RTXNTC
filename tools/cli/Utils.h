@@ -16,6 +16,10 @@
 #include <libntc/ntc.h>
 #include <functional>
 #include <optional>
+#if NTC_WITH_DX12
+// Make sure DXGI is included before DDSHeader.h to avoid macro redefinition errors later
+#include <dxgi.h>
+#endif
 #include <ntc-utils/DDSHeader.h>
 
 #define CHECK_NTC_RESULT(fname) \
