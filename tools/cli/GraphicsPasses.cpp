@@ -192,6 +192,7 @@ bool DecompressTextureSetWithGraphicsAPI(
     ntc::ITextureSetMetadata* metadata,
     ntc::IStream* inputFile,
     int mipLevels,
+    bool enableDithering,
     GraphicsResourcesForTextureSet const& graphicsResources)
 {
     // In some cases, this function is called without a file - which means we reuse the previously uploaded data.
@@ -242,12 +243,41 @@ bool DecompressTextureSetWithGraphicsAPI(
     // Decompress each mip level in a loop
     for (int mipLevel = 0; mipLevel < mipLevels; ++mipLevel)
     {
+        std::vector<ntc::OutputTextureDesc> outputs;
+        for (int textureIndex = 0; textureIndex < numTextures; ++textureIndex)
+        {
+            ntc::ITextureMetadata const* textureMetadata = metadata->GetTexture(textureIndex);
+            ntc::OutputTextureDesc& outputDesc = outputs.emplace_back();
+
+            outputDesc.descriptorIndex = textureIndex;
+
+            textureMetadata->GetChannels(outputDesc.firstChannel, outputDesc.numChannels);
+            outputDesc.rgbColorSpace = textureMetadata->GetRgbColorSpace();
+            outputDesc.alphaColorSpace = textureMetadata->GetAlphaColorSpace();
+
+            if (textureMetadata->GetChannelFormat() == ntc::ChannelFormat::UNORM8)
+            {
+                if (enableDithering)
+                {
+                    outputDesc.ditherScale = 1.f / 255.f;
+                }
+                else
+                {
+                    // Assume that if the user has requested no dithering, they also want the output
+                    // most closely matching the original image, so enable explicit quantization.
+                    outputDesc.quantizationScale = 1.f / 255.f;
+                }
+            }
+        }
+
         // Obtain the compute pass description and constant buffer data from NTC
         ntc::MakeDecompressionComputePassParameters params;
         params.textureSetMetadata = metadata;
         params.mipLevel = mipLevel;
         params.firstOutputDescriptorIndex = mipLevel * numTextures;
         params.weightType = weightType;
+        params.numOutputTextures = numTextures;
+        params.pOutputTextures = outputs.data();
         ntc::ComputePassDesc computePass{};
         ntc::Status ntcStatus = context->MakeDecompressionComputePass(params, &computePass);
         CHECK_NTC_RESULT("MakeDecompressionComputePass");

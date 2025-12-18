@@ -1,5 +1,29 @@
 # RTX Neural Texture Compression SDK Change Log
 
+## 0.9.1 BETA
+
+### LibNTC
+
+- Improved accuracy of DP4a based decompression and made it more consistent across GPUs and graphics APIs.
+
+### Command-Line Tool
+
+- Added `--no-dithering` option that disables color dithering when saving images after graphics API decompression.
+
+### Testing Infrastructure
+
+- Fixed reporting of PSNR values for mip chains in ImageDiff.
+- Updated the BC transcoding tests to use much lower tolerances.
+
+### Other
+
+- Updated the Donut framework to reduce the number of external library dependencies.
+
+### Known Issues
+
+Please see the [Known Issues](/README.md#known-issues) section of the main Readme file.
+
+
 ## 0.9.0 BETA
 
 ### Breaking Changes

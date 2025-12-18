@@ -57,6 +57,7 @@ bool DecompressTextureSetWithGraphicsAPI(
     ntc::ITextureSetMetadata* metadata,
     ntc::IStream* inputFile,
     int mipLevels,
+    bool enableDithering,
     GraphicsResourcesForTextureSet const& graphicsResources);
 
 bool CopyTextureSetDataIntoGraphicsTextures(

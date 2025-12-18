@@ -79,6 +79,7 @@ class Arguments:
 
     # Inverse feature toggles - these map to '--no-coopVec' etc.
     noCoopVec: bool = False
+    noDithering: bool = False
     
     # All the below parameters are passed directly as command line arguments to ntc-cli
     adapter: Optional[int] = None
@@ -145,6 +146,8 @@ class Arguments:
                 elif value != '': raise ValueError(f'Unrecognized graphicsApi = {value}')
             elif name == 'noCoopVec':
                 if value: result.append('--no-coopVec')
+            elif name == 'noDithering':
+                if value: result.append('--no-dithering')
             else:
                 # Generic fields - decide what to do based on the data type
                 if value is None or value == '':

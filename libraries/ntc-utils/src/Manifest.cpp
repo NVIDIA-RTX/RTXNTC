@@ -12,9 +12,7 @@
 
 #include <ntc-utils/Manifest.h>
 #include <filesystem>
-#include <json/value.h>
-#include <json/reader.h>
-#include <json/writer.h>
+#include <json/json.h>
 #include <algorithm>
 #include <fstream>
 #include <iostream>

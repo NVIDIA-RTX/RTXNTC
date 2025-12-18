@@ -12,13 +12,13 @@
 
 #include "Utils.h"
 #include <lodepng.h>
-#include <taskflow/taskflow.hpp>
+#include <donut/engine/ThreadPool.h>
 #include <algorithm>
 #include <stb_image_write.h>
 #include <tinyexr.h>
 #include <ntc-utils/Manifest.h>
 
-static tf::Executor g_Executor;
+static donut::engine::ThreadPool g_ThreadPool;
 
 static const BcFormatDefinition c_BlockCompressedFormats[] = {
     { ntc::BlockCompressedFormat::BC1, DXGI_FORMAT_BC1_UNORM, DXGI_FORMAT_BC1_UNORM_SRGB, nvrhi::Format::BC1_UNORM,    8, 4 },
@@ -139,12 +139,12 @@ bool SavePNG(uint8_t* data, int mipWidth, int mipHeight, int numChannels, bool i
 
 void StartAsyncTask(std::function<void()> function)
 {
-    g_Executor.async(function);
+    g_ThreadPool.AddTask(function);
 }
 
 void WaitForAllTasks()
 {
-    g_Executor.wait_for_all();
+    g_ThreadPool.WaitForTasks();
 }
 
 std::optional<ImageContainer> ParseImageContainer(char const* container)

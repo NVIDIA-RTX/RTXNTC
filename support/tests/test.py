@@ -436,21 +436,17 @@ class BlockCompressionTestCase(TestCase):
             saveImages=decompressedDir,
             saveMips=True,
             noCoopVec=True,
+            noDithering=True,
             graphicsApi=self.api
         )
 
         result = ntc.run(args)
         
-        # TODO: The PSNR values should be much higher than these thresholds.
-        # Currently, they are 'inf' on Vulkan (because the reference files were encoded on Vulkan)
-        # and just above these threshold values on DX12 without CoopVec.
-        # With CoopVec, they are lower/worse, but this is sort of expected because CoopVec uses FP8 math instead of INT8.
-        #
-        # Also note: we're not testing all files here, just a representative subset using different BC formats.
+        # Note: we're not testing all files here, just a representative subset using different BC formats.
         outputFileNamesAndTolerances = [
-            ('AmbientOcclusion.dds', 49.0), # BC1
-            ('Color.dds', 44.0),            # BC7
-            ('Roughness.dds', 50.0)         # BC4
+            ('AmbientOcclusion.dds', 90), # BC1
+            ('Color.dds', 60),            # BC7
+            ('Roughness.dds', 70)         # BC4
         ]
 
         inputFiles = []
@@ -466,10 +462,12 @@ class BlockCompressionTestCase(TestCase):
         mipLevels = 12
         self.assertEqual(len(compareResults), len(outputFileNamesAndTolerances) * mipLevels)
 
+        #print()
         for pair, mipLevel, mse, psnr in compareResults:
             name, tolerance = outputFileNamesAndTolerances[pair]
             if psnr < tolerance:
                 self.fail(f'Image mismatch for {name} at MIP {mipLevel}: MSE={mse}, PSNR={psnr} dB, Expected PSNR >= {tolerance} dB')
+            #print(f'{name} MIP {mipLevel}: {psnr} dB')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

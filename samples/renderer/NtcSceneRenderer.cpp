@@ -212,13 +212,11 @@ public:
         return nullptr;
     }
 
-#ifdef DONUT_WITH_TASKFLOW
     std::shared_ptr<engine::LoadedTexture> LoadTextureFromFileAsync(const std::filesystem::path& path, bool sRGB,
-        tf::Executor& executor) override
+        donut::engine::ThreadPool& threadPool) override
     {
         return nullptr;
     }
-#endif
 };
 
 enum class AntiAliasingMode

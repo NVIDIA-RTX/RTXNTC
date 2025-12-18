@@ -16,6 +16,7 @@
 #include <donut/engine/CommonRenderPasses.h>
 #include <donut/engine/Scene.h>
 #include <donut/engine/BindingCache.h>
+#include <donut/engine/ThreadPool.h>
 #include <donut/app/DeviceManager.h>
 #include <donut/app/UserInterfaceUtils.h>
 #include <donut/core/log.h>
@@ -30,8 +31,9 @@
 #include <filesystem>
 #include <argparse.h>
 #include <stb_image.h>
+#include <sstream>
 #include <tinyexr.h>
-#include <taskflow/taskflow.hpp>
+#include <unordered_set>
 #include <libntc/ntc.h>
 #include <imgui_internal.h>
 #include <cuda_runtime_api.h>
@@ -383,7 +385,7 @@ private:
     nvrhi::CommandListHandle m_commandList;
     nvrhi::CommandListHandle m_uploadCommandList;
     
-    tf::Executor m_executor;
+    engine::ThreadPool m_threadPool;
     std::mutex m_mutex;
 
     bool m_cudaAvailable = false;
@@ -472,7 +474,7 @@ public:
     ~Application() override
     {
         m_cancel = true;
-        m_executor.wait_for_all();
+        m_threadPool.WaitForTasks();
         
         GetDevice()->waitForIdle();
 
@@ -911,7 +913,7 @@ public:
         {
             ++m_texturesToLoad;
 
-            m_executor.async([this, entry, manifestIndex]()
+            m_threadPool.AddTask([this, entry, manifestIndex]()
             {
                 MaterialImage image{};
 
@@ -1983,7 +1985,7 @@ public:
                 }
         }
 
-        m_executor.async([this](){
+        m_threadPool.AddTask([this](){
             CompressionThreadProc();
             m_compressing = false;
             m_cancel = false;
@@ -2086,7 +2088,7 @@ public:
         {
             if (m_texturesLoaded + m_errors == m_texturesToLoad)
             {
-                m_executor.wait_for_all();
+                m_threadPool.WaitForTasks();
                 m_loading = false;
 
                 UploadTextures();

@@ -59,6 +59,7 @@ struct
     bool enableCoopVec = true;
     bool enableGpuDeflate = false;
     bool printVersion = false;
+    bool enableDithering = true;
     int gridSizeScale = 2;
     int numFeatures = NTC_MLP_FEATURES;
     int adapterIndex = -1;
@@ -127,6 +128,7 @@ bool ProcessCommandLine(int argc, const char** argv)
         OPT_STRING ('B', "bcFormat", &bcFormatString, "Set or override the BCn encoding format, BC1-BC7"),
         OPT_STRING ('F', "imageFormat", &imageFormatString, "Set the output file format for color images: Auto (default), BMP, JPG, TGA, PNG, PNG16, EXR"),
         OPT_STRING (0,   "dimensions", &dimensionsString, "Set the dimensions of the NTC texture set before compression, in the 'WxH' format"),
+        OPT_BOOLEAN(0,   "dithering", &g_options.enableDithering, "Enable dithering for 8-bit output textures when decompressing with graphics APIs (default on, use --no-dithering)"),
         
         OPT_GROUP("Advanced settings:"),
         OPT_FLOAT  (0,   "bcPsnrThreshold", &g_options.bcPsnrThreshold, "PSNR loss threshold for BC7 optimization, in dB, default value is 0.2"),
@@ -2070,7 +2072,8 @@ int main(int argc, const char** argv)
         {
             bool const decompressSucceeded = DecompressTextureSetWithGraphicsAPI(device, commandList,
                 timerQuery, gdp, gdeflateFeatures.get(),
-                context, metadata, iteration == 0 ? inputFile.Get() : nullptr, mipLevels, graphicsResources);
+                context, metadata, iteration == 0 ? inputFile.Get() : nullptr, mipLevels, g_options.enableDithering,
+                graphicsResources);
 
             if (!decompressSucceeded)
                 return 1;

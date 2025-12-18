@@ -250,6 +250,7 @@ bool CompareTwoImages(nvrhi::IDevice* device, nvrhi::ICommandList* commandList,
         ntc::MakeImageDifferenceComputePassParameters imageDifferenceParams = {};
         imageDifferenceParams.extent.width = int(mipWidth);
         imageDifferenceParams.extent.height = int(mipHeight);
+        imageDifferenceParams.outputOffset = imageDifferencePass.GetOffsetForQuery(mipLevel);
         ntc::ComputePassDesc computePass = {};
         ntc::Status ntcStatus = ntcContext->MakeImageDifferenceComputePass(imageDifferenceParams, &computePass);
         CHECK_NTC_RESULT(MakeImageDifferenceComputePass);

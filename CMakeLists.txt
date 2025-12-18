@@ -20,8 +20,6 @@ set(NVTT3_SEARCH_PATH "" CACHE PATH "Custom search path for NVTT3")
 option(NTC_WITH_RENDERER "Include the Renderer sample" ON)
 option(NTC_DEBUG_SHADERS "Compile NTC shaders with debug information" OFF)
 
-option(DONUT_WITH_LZ4 "" OFF)
-option(DONUT_WITH_MINIZ "" OFF)
 option(DONUT_WITH_DX11 "" OFF)
 if (WIN32)
     option(DONUT_WITH_DX12 "" ON)
