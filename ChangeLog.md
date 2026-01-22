@@ -1,5 +1,18 @@
 # RTX Neural Texture Compression SDK Change Log
 
+## 0.9.2 BETA
+
+### LibNTC
+
+- Fixed the `FileUnrecognized` error that happened in some cases when the binary chunk size was not a multiple of 4.
+
+### Command-Line Tool
+
+- Added `--keepFileNames` option that preserves the full original texture file names in the NTC file.
+- Fixed the `--matchBcPsnr` feature on Vulkan.
+- Fixed Vulkan initialization errors when using the tool over SSH.
+
+
 ## 0.9.1 BETA
 
 ### LibNTC

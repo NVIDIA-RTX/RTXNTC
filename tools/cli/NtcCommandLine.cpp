@@ -60,6 +60,7 @@ struct
     bool enableGpuDeflate = false;
     bool printVersion = false;
     bool enableDithering = true;
+    bool keepFileNames = false;
     int gridSizeScale = 2;
     int numFeatures = NTC_MLP_FEATURES;
     int adapterIndex = -1;
@@ -144,7 +145,8 @@ bool ProcessCommandLine(int argc, const char** argv)
             "Don't use GDeflate compression if sizeof(compressedData) >= sizeof(uncompressedData) * X, default is 0.95"),
         OPT_INTEGER(0,   "gdeflateLevel", &g_options.losslessCompression.compressionLevel, "GDeflate compression level, 0-12, default is 9"),
         OPT_INTEGER(0,   "gdeflateThreads", &g_options.losslessCompression.compressionThreads, "Number of GDeflate compression threads, 0 means auto, -1 means disable"),
-        
+        OPT_BOOLEAN(0,   "keepFileNames", &g_options.keepFileNames, "Use original image file names as texture names, not their distinct components"),
+
         OPT_GROUP("GPU and Graphics API settings:"),
         OPT_INTEGER(0, "adapter", &g_options.adapterIndex, "Index of the graphics adapter to use"),
         OPT_BOOLEAN(0, "coopVec", &g_options.enableCoopVec, "Enable CoopVec extensions (default on, use --no-coopVec)"),
@@ -1612,6 +1614,7 @@ donut::app::DeviceCreationParameters GetGraphicsDeviceParameters(nvrhi::Graphics
     deviceParams.adapterIndex = g_options.adapterIndex;
     deviceParams.enableDebugRuntime = g_options.debug;
     deviceParams.enableNvrhiValidationLayer = g_options.debug;
+    deviceParams.headlessDevice = true;
 
     SetNtcGraphicsDeviceParameters(deviceParams, graphicsApi, true, g_options.enableCoopVec, nullptr);
 
@@ -2119,14 +2122,14 @@ int main(int argc, const char** argv)
             case ToolInputType::Directory: {
                 assert(g_options.loadImagesPath);
 
-                GenerateManifestFromDirectory(g_options.loadImagesPath, g_options.loadMips, manifest);
+                GenerateManifestFromDirectory(g_options.loadImagesPath, g_options.loadMips, g_options.keepFileNames, manifest);
                 *textureSet.ptr() = LoadImages(context, manifest, true);
                 break;
             }
             case ToolInputType::Images: {
                 assert(!g_options.loadImagesList.empty());
 
-                GenerateManifestFromFileList(g_options.loadImagesList, manifest);
+                GenerateManifestFromFileList(g_options.loadImagesList, g_options.keepFileNames, manifest);
                 *textureSet.ptr() = LoadImages(context, manifest, true);
                 break;
             }

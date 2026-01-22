@@ -1,4 +1,4 @@
-# RTX Neural Texture Compression (NTC) SDK v0.9.0 BETA
+# RTX Neural Texture Compression (NTC) SDK v0.9.2 BETA
 
 [Quick Start Guide](#quick-start-guide)
 
@@ -28,16 +28,16 @@ To demonstrate how NTC compares to other methods, consider a material defined by
 
 *Example material from [MetalPlates013 from AmbientCG](https://ambientcg.com/view?id=MetalPlates013)*
 
-Assuming 8 bits per channel and optimal channel packing, this corresponds to a bitrate of 64 bits/texel. In a contemporary pipeline this might be block-compressed into one BC7 texture for Albedo (8 bits/texel), one BC5 texture for normals (4 bits/texel), and a third BC7 texture for Roughness, Metalness, and Ambient Occlusion packed as separate channels (for another 8 bits/texel). For NTC we have found that many real-world texture bundles of this format can be compressed with results comparable to BCn (a PSNR of 40 to 50 dB) with a latent shape requiring about 3 bits/texel.
+Assuming 8 bits per channel and optimal channel packing, this corresponds to a bitrate of 64 bits/texel. In a contemporary pipeline this might be block-compressed into one BC7 texture for Albedo (8 bits/texel), one BC5 texture for normals (8 bits/texel), and a third BC7 texture for Roughness, Metalness, and Ambient Occlusion packed as separate channels (for another 8 bits/texel). For NTC we have found that many real-world texture bundles of this format can be compressed with results comparable to BCn (a PSNR of 40 to 50 dB) with a latent shape requiring about 5 bits/texel.
 
 If we assume a 2k-by-2k texture resolution (and ignore the mip chains) we can compute the texture footprint of the bundle at various points in the data pipeline:
 
 | Bundle Compression | Disk Size | PCI-E Traffic | VRAM Size |
 |:-------------------|----------:|--------------:|----------:|
 | Raw Image          | 32.00 MB  | 32.00 MB      | 32.00 MB  |
-| BCn Compressed     | 10.00 MB  | 10.00 MB      | 10.00 MB  |
-| NTC-on-Load*       |  1.52 MB  |  1.52 MB      | 10.00 MB  |
-| NTC-on-Sample      |  1.52 MB  |  1.52 MB      | 1.52 MB   |
+| BCn Compressed     | 12.00 MB  | 12.00 MB      | 12.00 MB  |
+| NTC-on-Load*       |  2.50 MB  |  2.50 MB      | 12.00 MB  |
+| NTC-on-Sample      |  2.50 MB  |  2.50 MB      |  2.50 MB  |
 
 *: Assumes transcoding to equivalent BCn formats at decompression time.
 
@@ -116,7 +116,7 @@ For a list of software components needed to build the SDK, please refer to the [
 
 - GDeflate decompression with `VK_NV_memory_decompression` with the NVIDIA 590.26 Developer Preview driver crashes the GPU unless Nsight Aftermath is enabled.
 - Running NTC SDK apps in D3D12 mode on non-Developer Preview NVIDIA drivers may result in messages like `ERROR: D3D12CreateDevice failed, error code = 0x80070057`. To work around that, add `--no-coopVec`.
-- CoopVec FP8 inference produces incorrect results on Intel Arc B-series GPUs with the latest driver (101.8331).
+- CoopVec FP8 inference produces incorrect results on Intel Arc B-series GPUs with the latest driver (101.8425). Driver version 101.6913 is known to work correctly.
 - Inference on Feedback mode in the Rendering sample is broken on AMD GPUs.
 
 ## Build Guide

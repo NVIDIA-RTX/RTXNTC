@@ -28,13 +28,15 @@ def apply_common_settings(args: ntc.Arguments):
     args.randomSeed = 1
     pass
 
-# Array of ([ column_names... ], { parameter : value })
 
-experimentTitles = ['Scale', 'Features']
+# CSV column names for the experiment definitions
+experimentTitles = ['BPP']
+
+# Array of ([ column values... ], { parameter : value... })
 experiments = []
-for scale in range(1, 7):
-    for features in range(4, 20, 4):
-        experiments.append(([scale, features], { "latentShape": ntc.LatentShape(gridSizeScale = scale, numFeatures = features) }))
+# Iterate over all "known" BPP values
+for bpp in [1.11, 1.67, 2.50, 3.75, 5.00, 6.67, 10.0, 15.0, 20.0]:
+    experiments.append(([bpp], { "bitsPerPixel": bpp }))
 
 # END of user-modifiable section
 # =======================================================================================
@@ -42,11 +44,10 @@ for scale in range(1, 7):
 
 root = ntc.get_sdk_root_path()
 defaultTool = ntc.get_default_tool_path()
-defaultDataset = 'data/TestingDataset'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--tool', default = defaultTool, help = f'Path to the ntc-cli executable, defaults to {defaultTool}')
-parser.add_argument('--dataset', default = os.path.join(root, defaultDataset), help = 'Path to the directory with test materials, defaults to ../data/TestingDataset')
+parser.add_argument('--dataset', required = True, help = 'Path to the directory with test materials')
 parser.add_argument('--limit', type = int, help = 'Maximum number of materials to test')
 parser.add_argument('--skip', type = int, help = 'Skip the first N materials')
 parser.add_argument('--stride', type = int, help = 'Test every Nth material in the dataset')

@@ -9,3 +9,4 @@ bin/windows-x64/nvngx_dlss.dll
 libraries/ntc.py
 LICENSE.txt 
 ThirdPartyLicenses.txt
+support/tools/convert_gltf_materials.py

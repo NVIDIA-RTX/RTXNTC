@@ -25,7 +25,7 @@ When an error happens in ntc-cli, the run(...) function will raise a RuntimeErro
 """
 
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Any, Callable
+from typing import Optional, List, Tuple, Dict, Any, Callable
 from argparse import Namespace
 import subprocess
 import re
@@ -103,6 +103,7 @@ class Arguments:
     gpuGDeflate: bool = False
     gridLearningRate: Optional[float] = None
     imageFormat: str = ''
+    keepFileNames: bool = False
     kPixelsPerBatch: Optional[int] = None
     latentShape: Optional[LatentShape] = None
     listAdapters: bool = False
@@ -181,6 +182,7 @@ class Result:
     overallPsnr: Optional[float] = None
     overallPsnrFP8: Optional[float] = None
     perMipPsnr: Optional[List[float]] = None
+    perTexturePsnr: Optional[Dict[str, float]] = None
     bitsPerPixel: Optional[float] = None
     combinedBcPsnr: Optional[float] = None
     combinedBcBitsPerPixel: Optional[float] = None
@@ -240,6 +242,7 @@ _graphicsDecompressionTimeRegex = Regex(r'Median decompression time over \d+ ite
 _latentShapeRegex = Regex(r'Latent shape: --gridSizeScale (?P<gss>\d+) --numFeatures (?P<nf>\d+)')
 _mipRegex = Regex(r'MIP\s+(?P<mipLevel>\d+)\s+PSNR: (?P<psnr>[0-9\.]+|inf) dB')
 _overallPsnrRegex = Regex(r'Overall PSNR \((?P<type>\w+) weights\): (?P<psnr>[0-9\.]+|inf) dB')
+_perTexturePsnrRegex = Regex(r'  (?P<name>[A-Za-z0-9\.\-_]+)\s+: (?P<psnr>[0-9\.]+|inf) dB \[.+\]')
 _stepRegex = Regex(r'Training: (?P<steps>\d+) steps, (?P<milliseconds>[0-9\.]+) ms/step, intermediate PSNR: (?P<psnr>[0-9\.]+|inf) dB')
 _systemRegex = Regex(r'Using (?P<gpu>.+) with (?P<api>.+) API\. CoopVec \[(?P<coopVec>[YN])\], GDeflate \[(?P<gdeflate>[YN])\]')
 _imageDiffRegex = Regex(r'PAIR (?P<pair>\d+) MIP\s+(?P<mipLevel>\d+): MSE = (?P<mse>[0-9\.]+|inf), PSNR = (?P<psnr>[0-9\.]+|inf) dB')
@@ -301,6 +304,11 @@ def run(args: Arguments) -> Result:
 
         elif m := _mipRegex.parse(line):
             result.perMipPsnr = _create_or_append_list(result.perMipPsnr, float(m.psnr))
+
+        elif m := _perTexturePsnrRegex.parse(line):
+            if result.perTexturePsnr is None:
+                result.perTexturePsnr = {}
+            result.perTexturePsnr[m.name] = float(m.psnr)
 
         elif m := _overallPsnrRegex.parse(line):
             if m.type == 'FP8':

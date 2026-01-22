@@ -77,7 +77,7 @@ static void ComputeDistinctImageNames(Manifest& manifest)
     }
 }
 
-void GenerateManifestFromDirectory(const char* path, bool loadMips, Manifest& outManifest)
+void GenerateManifestFromDirectory(const char* path, bool loadMips, bool keepFileNames, Manifest& outManifest)
 {
     for (const fs::directory_entry& directoryEntry : fs::directory_iterator(path))
     {
@@ -92,7 +92,10 @@ void GenerateManifestFromDirectory(const char* path, bool loadMips, Manifest& ou
 
         ManifestEntry& entry = outManifest.textures.emplace_back();
         entry.fileName = fileName.generic_string();
-        entry.entryName = fileName.stem().generic_string();
+        if (keepFileNames)
+            entry.entryName = fileName.filename().generic_string();
+        else
+            entry.entryName = fileName.stem().generic_string();
         entry.mipLevel = 0;
     }
 
@@ -136,10 +139,11 @@ void GenerateManifestFromDirectory(const char* path, bool loadMips, Manifest& ou
         }
     }
 
-    ComputeDistinctImageNames(outManifest);
+    if (!keepFileNames)
+        ComputeDistinctImageNames(outManifest);
 }
 
-void GenerateManifestFromFileList(std::vector<const char *> const &files, Manifest &outManifest)
+void GenerateManifestFromFileList(std::vector<const char *> const &files, bool keepFileNames, Manifest &outManifest)
 {
     for (char const* name : files)
     {
@@ -147,11 +151,15 @@ void GenerateManifestFromFileList(std::vector<const char *> const &files, Manife
 
         ManifestEntry& entry = outManifest.textures.emplace_back();
         entry.fileName = fileName.generic_string();
-        entry.entryName = fileName.stem().generic_string();
+        if (keepFileNames)
+            entry.entryName = fileName.filename().generic_string();
+        else
+            entry.entryName = fileName.stem().generic_string();
         entry.mipLevel = 0;
     }
     
-    ComputeDistinctImageNames(outManifest);
+    if (!keepFileNames)
+        ComputeDistinctImageNames(outManifest);
 }
 
 static bool ReadFileIntoVector(FILE* inputFile, std::vector<char>& vector)

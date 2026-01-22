@@ -705,7 +705,7 @@ public:
     bool BeginLoadingImagesFromDirectory(const char* path)
     {
         Manifest manifest;
-        GenerateManifestFromDirectory(path, false, manifest);
+        GenerateManifestFromDirectory(path, false, false, manifest);
         if (manifest.textures.empty())
         {
             log::error("The folder '%s' contains no compatible image files.", path);
@@ -729,7 +729,7 @@ public:
     bool BeginLoadingImagesFromFileList(std::vector<char const*> const& files)
     {
         Manifest manifest;
-        GenerateManifestFromFileList(files, manifest);
+        GenerateManifestFromFileList(files, false, manifest);
 
         if (manifest.textures.size() > NTC_MAX_CHANNELS)
         {

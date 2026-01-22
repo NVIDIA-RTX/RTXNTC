@@ -89,9 +89,9 @@ char const* SemanticLabelToString(SemanticLabel label);
 
 int GetSemanticChannelCount(SemanticLabel label);
 
-void GenerateManifestFromDirectory(const char* path, bool loadMips, Manifest& outManifest);
+void GenerateManifestFromDirectory(const char* path, bool loadMips, bool keepFileNames, Manifest& outManifest);
 
-void GenerateManifestFromFileList(std::vector<const char*> const& files, Manifest& outManifest);
+void GenerateManifestFromFileList(std::vector<const char*> const& files, bool keepFileNames, Manifest& outManifest);
     
 bool ReadManifestFromFile(const char* fileName, Manifest& outManifest,
     std::string& outError);

@@ -799,7 +799,7 @@ bool OptimizeBlockCompression(
     if (!anyBC7Textures)
         return true;
 
-    GraphicsBlockCompressionPass blockCompressionPass(device, true);
+    GraphicsBlockCompressionPass blockCompressionPass(device, 1);
     if (!blockCompressionPass.Init())
         return false;
 
@@ -974,7 +974,7 @@ bool ComputePsnrForBlockCompressedTextureSet(
 {
     assert(device);
     
-    GraphicsBlockCompressionPass blockCompressionPass(device, false);
+    GraphicsBlockCompressionPass blockCompressionPass(device, 1);
     if (!blockCompressionPass.Init())
         return false;
 
