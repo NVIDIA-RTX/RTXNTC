@@ -181,12 +181,14 @@ bool CompareTwoImages(nvrhi::IDevice* device, nvrhi::ICommandList* commandList,
     commandList->open();
     
     std::shared_ptr<donut::engine::LoadedTexture> texture1 = textureCache.LoadTextureFromFile(
-        source1, false, nullptr, commandList);
+        source1, donut::engine::TextureLoadOptions{}, nullptr, commandList);
 
     bool const sRGB = (texture1->texture && nvrhi::getFormatInfo(texture1->texture->getDesc().format).isSRGB);
 
+    donut::engine::TextureLoadOptions options2;
+    options2.sRGBMode = sRGB ? donut::engine::SRGBMode::ForceSRGB : donut::engine::SRGBMode::FromFile;
     std::shared_ptr<donut::engine::LoadedTexture> texture2 = textureCache.LoadTextureFromFile(
-        source2, sRGB, nullptr, commandList);
+        source2, options2, nullptr, commandList);
 
     commandList->close();
     device->executeCommandList(commandList);

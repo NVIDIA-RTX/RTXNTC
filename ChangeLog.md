@@ -1,15 +1,49 @@
 # RTX Neural Texture Compression SDK Change Log
 
+## 0.10.1 BETA
+
+### LibNTC
+
+- Updated the DX12 build to the Agility SDK 1.722 preview headers.
+- Fixed reduced quality of DX12 LinAlg inference: the inputs of the last network layer are now rounded before the int8 conversion, which makes the results match Vulkan and CUDA.
+
+### Other
+
+- Updated the DirectX 12 Agility SDK to `1.722.0-preview`.
+- Updated Donut and NVRHI to versions that build against the Agility SDK 1.722 preview.
+
+### Known Issues
+
+Please see the [Known Issues](/README.md#known-issues) section of the main Readme file.
+
+
 ## 0.10.0 BETA
 
 ### LibNTC
 
-- Added support for inference using DX12 LinAlg API.
+- Added support for inference using the DX12 LinAlg API (Shader Model 6.10).
 - Added support for inference with OptiX.
+- Added Windows ARM64 support.
+- Fixed a lost-wakeup deadlock in the ThreadPool during teardown.
+- Made the build compatible with CUDA 13.
+- Updated the shader compilers for Shader Model 6.10 / LinAlg (Slang 2026.10.2, DXC, and DirectX-Headers).
 
 ### Command-Line Tool
 
 - Added a mode to decompress texture sets with OptiX for testing.
+- Reworked texture semantics to use free-form string labels in the manifest.
+
+### Rendering Sample
+
+- Fixed the initial NTC rendering mode being overwritten on startup.
+
+### Documentation
+
+- Documented the Cooperative Vector inference interfaces for DX12 (LinAlg) and Vulkan.
+
+### Known Issues
+
+Please see the [Known Issues](/README.md#known-issues) section of the main Readme file.
 
 
 ## 0.9.2 BETA

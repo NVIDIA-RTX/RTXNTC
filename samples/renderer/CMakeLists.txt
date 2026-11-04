@@ -152,7 +152,8 @@ donut_compile_shaders(
     SPIRV_SLANG ${shader_output_dir}
     INCLUDES ${libntc_include_directory} ${libstf_include_directory} ${dxc_include_directory}
     SHADERMAKE_OPTIONS "${debug_option}"
-    SHADERMAKE_OPTIONS_SPIRV "-X \"-capability spvCooperativeVectorNV\""
+    # Without an explicit value, ShaderMake defines __SLANG__ as empty for Slang, which breaks '#if __SLANG__'
+    SHADERMAKE_OPTIONS_SPIRV "-D __SLANG__=1 -X \"-capability spvCooperativeVectorNV\""
 )
 
 add_dependencies(ntc-renderer ntc-renderer-shaders)

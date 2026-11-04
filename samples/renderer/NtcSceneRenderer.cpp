@@ -205,19 +205,21 @@ class DummyTextureCache : public engine::TextureCache
 public:
     using engine::TextureCache::TextureCache;
 
-    std::shared_ptr<engine::LoadedTexture> LoadTextureFromFile(const std::filesystem::path& path, bool sRGB,
-        engine::CommonRenderPasses* passes, nvrhi::ICommandList* commandList) override
+    std::shared_ptr<engine::LoadedTexture> LoadTextureFromFile(const std::filesystem::path& path,
+        const engine::TextureLoadOptions& options, engine::CommonRenderPasses* passes,
+        nvrhi::ICommandList* commandList) override
     {
         return nullptr;
     }
 
-    std::shared_ptr<engine::LoadedTexture> LoadTextureFromFileDeferred(const std::filesystem::path& path, bool sRGB) override
+    std::shared_ptr<engine::LoadedTexture> LoadTextureFromFileDeferred(const std::filesystem::path& path,
+        const engine::TextureLoadOptions& options) override
     {
         return nullptr;
     }
 
-    std::shared_ptr<engine::LoadedTexture> LoadTextureFromFileAsync(const std::filesystem::path& path, bool sRGB,
-        donut::engine::ThreadPool& threadPool) override
+    std::shared_ptr<engine::LoadedTexture> LoadTextureFromFileAsync(const std::filesystem::path& path,
+        const engine::TextureLoadOptions& options, donut::engine::ThreadPool& threadPool) override
     {
         return nullptr;
     }

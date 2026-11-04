@@ -93,6 +93,17 @@ endif()
 include(libraries/RTXNTC-Library/tools/ConfigureCompilers.cmake)
 LibNTC_ConfigureShaderCompilerVersions()
 
+# Fetch the Agility SDK before including Donut, because NVRHI reads its headers when DXR cluster support is on.
+# That support is on only because it leaves out NVRHI's LinAlg code, which doesn't build against the 1.722 headers yet.
+# NTC uses LinAlg through LibNTC, not NVRHI.
+
+if (DONUT_WITH_DX12)
+    set(DONUT_D3D_AGILITY_SDK_URL "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.722.0-preview")
+    set(DONUT_D3D_AGILITY_SDK_FETCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/dx12-agility-sdk" CACHE STRING "" FORCE)
+    set(NVRHI_D3D12_WITH_DXRCLUSTER ON CACHE BOOL "" FORCE)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/external/donut/cmake/FetchAgilitySDK.cmake")
+endif()
+
 # Include the Donut framework with all of its dependencies like NVRHI and ShaderMake.
 # Note: ShaderMake downloads the DXC and Slang binaries from GitHub when SHADERMAKE_FIND_COMPILERS is ON.
 
@@ -143,9 +154,6 @@ option(NTC_WITH_VULKAN "" "${DONUT_WITH_VULKAN}")
 add_subdirectory(libraries/RTXNTC-Library)
 
 if (DONUT_WITH_DX12)
-    set(DONUT_D3D_AGILITY_SDK_URL "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.721.0-preview")
-    set(DONUT_D3D_AGILITY_SDK_FETCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/dx12-agility-sdk" CACHE STRING "" FORCE)
-    include("${CMAKE_CURRENT_SOURCE_DIR}/external/donut/cmake/FetchAgilitySDK.cmake")
     include(ConfigureAgilitySDK)
 
     set(DIRECTSTORAGE_SDK_URL "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.DirectStorage/1.3.0")

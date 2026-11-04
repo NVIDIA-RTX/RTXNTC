@@ -1,4 +1,4 @@
-# RTX Neural Texture Compression (NTC) SDK v0.10.0 BETA
+# RTX Neural Texture Compression (NTC) SDK v0.10.1 BETA
 
 [Quick Start Guide](#quick-start-guide)
 
@@ -51,7 +51,7 @@ Decompressing texels with NTC requires reading the latent data corresponding to 
 In order to provide robust backwards compatibility, fallback implementations of the inference code using the `DP4a` instructions or regular integer math have also been provided. This will allow for the decompression code to be executed reliably on any platform that supports at least Direct3D 12 Shader Model 6; however, there will be substantial performance improvements on newer GPUs. See [System Requirements](#system-requirements) for more details.
 
 > ### WARNING: Pre-Release Feature Dependency for Direct3D 12
-> NTC texture decompression for DX12 applications, both on-load and on-sample, relies on a preview version of the [Microsoft DirectX 12 Agility SDK](https://devblogs.microsoft.com/directx/directx12agility/), specifically, `1.721.0-preview`. In order for the [LinAlg](https://devblogs.microsoft.com/directx/d3d12-linalg-preview/) (formerly Cooperative Vector) extensions to work, the application must enable the `D3D12ExperimentalShaderModels` feature, which requires that Windows is configured to be in the Developer Mode. 
+> NTC texture decompression for DX12 applications, both on-load and on-sample, relies on a preview version of the [Microsoft DirectX 12 Agility SDK](https://devblogs.microsoft.com/directx/directx12agility/), specifically, `1.722.0-preview`. In order for the [LinAlg](https://devblogs.microsoft.com/directx/d3d12-linalg-preview/) (formerly Cooperative Vector) extensions to work, the application must enable the `D3D12ExperimentalShaderModels` feature, which requires that Windows is configured to be in the Developer Mode. 
 >
 > A pre-release NVIDIA GPU driver version 620.12 or later is required for Shader Model 6.10 (LinAlg) functionality.
 > 
