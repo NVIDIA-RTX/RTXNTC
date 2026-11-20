@@ -197,13 +197,14 @@ Building the NTC SDK on Linux requires the following components:
 - Some development packages, approximately:
   ```sh
   sudo apt-get update
-  sudo apt-get install build-essential cmake libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+  sudo apt-get install build-essential cmake pkg-config git-lfs libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libwayland-dev libxkbcommon-dev
   ```
 
 Follow the usual way of building CMake projects on Linux:
 
-- Clone the project recursively:
+- Clone the project recursively. The sample assets are stored in Git LFS, so run `git lfs install` once before cloning:
   ```sh
+  git lfs install
   git clone --recursive https://github.com/NVIDIA-RTX/RTXNTC.git
   ```
 - Create the build folder, configure and build:
